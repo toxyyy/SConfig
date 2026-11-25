@@ -1,7 +1,7 @@
 use crate::{archive, discovery, files::*, storage::*, switching::Decision};
 use anyhow::{bail, ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::RecommendedWatcher;
 use rfd::FileDialog;
 use rusqlite::params;
 use serde::Deserialize;
@@ -27,12 +27,16 @@ pub struct Session {
     pub store: Store,
     pub grants: Grants,
     pub watcher: Option<RecommendedWatcher>,
+    pub changes: std::sync::mpsc::Sender<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Action {
     Library,
+    Game {
+        game: String,
+    },
     Removed,
     WindowTheme {
         light: bool,
@@ -45,10 +49,22 @@ pub enum Action {
         path: Option<PathBuf>,
     },
     PrismFolder,
+    PrismInstances,
+    PrismCopy {
+        source: String,
+        destination: String,
+    },
     Share {
         game: String,
         profile: String,
         targets: Vec<String>,
+    },
+    AddFiles {
+        game: String,
+        files: Vec<PathBuf>,
+    },
+    ManagedFiles {
+        game: String,
     },
     Suggestions {
         game: String,
@@ -108,6 +124,12 @@ pub enum Action {
         decision: Decision,
         token: Option<String>,
     },
+    Flush {
+        game: String,
+    },
+    WindowControl {
+        operation: String,
+    },
     Save {
         game: String,
     },
@@ -164,9 +186,35 @@ fn choose(
         }
     }
     if field == "files" || field == "source" {
-        if let Some(doc) = documents {
+        if let Some(doc) = &documents {
             let games = doc.join("My Games");
-            dialog = dialog.set_directory(if games.is_dir() { games } else { doc });
+            dialog = dialog.set_directory(if games.is_dir() { games } else { doc.clone() });
+        }
+    }
+    if field == "files" {
+        if let Some(id) = game {
+            if let Some(mapping) = s.store.game(id)?.maps.first() {
+                dialog = dialog.set_directory(&mapping.root);
+            }
+        }
+    }
+    if matches!(field, "files" | "source") {
+        if let Some(id) = game {
+            let g = s.store.game(id)?;
+            if g.maps.is_empty() {
+                let roots = discovery::KnownFolders {
+                    documents: documents.clone(),
+                    roaming: std::env::var_os("APPDATA").map(PathBuf::from),
+                };
+                let (_, c) = discovery::candidates(&g, &roots);
+                if let Some(p) = c
+                    .first()
+                    .and_then(|c| c.files.first())
+                    .and_then(|p| p.parent())
+                {
+                    dialog = dialog.set_directory(p);
+                }
+            }
         }
     }
     let (set, paths) = match field {
@@ -269,6 +317,24 @@ fn revision(data: &Contents) -> Result<Vec<u8>> {
     )?)
 }
 
+fn control_window(app: &AppHandle, operation: &str) -> Result<Value> {
+    if let Some(w) = app.get_webview_window("main") {
+        match operation {
+            "minimize" => w.minimize()?,
+            "maximize" => {
+                if w.is_maximized()? {
+                    w.unmaximize()?
+                } else {
+                    w.maximize()?
+                }
+            }
+            "close" => w.close()?,
+            "drag" => w.start_dragging()?,
+            _ => bail!("Unknown window action."),
+        }
+    }
+    Ok(Value::Null)
+}
 fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
     let store = &mut s.store;
     match action {
@@ -351,6 +417,111 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
                 Ok(Value::Null)
             }
         }
+        Action::PrismInstances => {
+            let mut out = vec![];
+            for game in store
+                .games()?
+                .into_iter()
+                .filter(|g| g.platform == "Prism Launcher")
+            {
+                let data = capture(&game.maps).unwrap_or_default();
+                let meta: Option<String> = store
+                    .db
+                    .query_row(
+                        "SELECT data FROM prism_meta WHERE game=?",
+                        [&game.id],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                let meta: Value = meta
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or(Value::Null);
+                out.push(json!({"game":game,"overview":sconfig::overview::summarize(&data),"available":!data.is_empty()&&data.iter().all(Option::is_some),"version":meta["version"]}));
+            }
+            Ok(json!(out))
+        }
+        Action::PrismCopy {
+            source,
+            destination,
+        } => {
+            ensure!(source != destination, "Choose a different source instance.");
+            let from = store.game(&source)?;
+            let mut to = store.game(&destination)?;
+            ensure!(
+                from.platform == "Prism Launcher" && to.platform == "Prism Launcher",
+                "Choose Prism instances."
+            );
+            store.ready(&from)?;
+            store.ready(&to)?;
+            crate::switching::ensure_closed(&from)?;
+            crate::switching::ensure_closed(&to)?;
+            let incoming = capture(&from.maps)?;
+            let current = capture(&to.maps)?;
+            ensure!(
+                incoming.iter().all(Option::is_some),
+                "Launch the source instance once to generate its settings."
+            );
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            ensure!(
+                capture(&from.maps)? == incoming,
+                "The source instance settings are still changing."
+            );
+            if from.active.is_some() {
+                store.auto_save(&from, &incoming)?;
+            }
+            if to.active.is_some() {
+                store.auto_save(&to, &current)?;
+            }
+            let source_root = fs::canonicalize(discovery::minecraft_dir(&from.install))?;
+            let target_root = fs::canonicalize(discovery::minecraft_dir(&to.install))?;
+            let mut settings = std::collections::HashMap::new();
+            for (mapping, bytes) in from.maps.iter().zip(&incoming) {
+                let path = mapping.destination()?;
+                if let Ok(key) = path.strip_prefix(&source_root) {
+                    settings.insert(key.to_owned(), bytes.clone());
+                }
+            }
+            let mut data = current.clone();
+            let mut matched = 0;
+            for (i, mapping) in to.maps.iter().enumerate() {
+                let path = mapping.destination()?;
+                if let Ok(key) = path.strip_prefix(&target_root) {
+                    if let Some(bytes) = settings.get(key) {
+                        data[i] = bytes.clone();
+                        matched += 1;
+                    }
+                }
+            }
+            ensure!(
+                matched > 0,
+                "These instances have no matching managed configuration files."
+            );
+            if data == current {
+                return Ok(json!({"changed":false}));
+            }
+            let profile = Store::make(
+                &to,
+                &format!("From {}", from.name.chars().take(100).collect::<String>()),
+                false,
+            )?;
+            store.insert_snapshot(&mut to, &profile, &data, false)?;
+            let result = store.apply(&mut to, &profile.id, Decision::Check, None);
+            match result {
+                Ok(crate::switching::Outcome::Applied) => Ok(json!({"changed":true})),
+                Ok(crate::switching::Outcome::Unsaved { token, .. }) => {
+                    let outcome =
+                        store.apply(&mut to, &profile.id, Decision::Save, Some(&token))?;
+                    ensure!(matches!(outcome, crate::switching::Outcome::Applied), "The destination settings are still changing. Try again after closing the game.");
+                    Ok(json!({"changed":true}))
+                }
+                Err(e) => {
+                    if store.ready(&to).is_ok() && to.active.as_deref() != Some(&profile.id) {
+                        let _ = store.remove(&to, &profile.id);
+                    }
+                    Err(e)
+                }
+            }
+        }
         Action::PrismFolder => {
             if let Some(dir) = FileDialog::new()
                 .set_title("Choose Prism Launcher's data folder")
@@ -408,8 +579,38 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
                 .map(|(game, profile)| json!({"game":game,"profile":profile}))
                 .collect::<Vec<_>>()))
         }
+        Action::Flush { game } => {
+            let g = store.game(&game)?;
+            if g.active.is_some() {
+                let data = capture(&g.maps)?;
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                store.auto_save(&g, &data)?;
+            }
+            Ok(Value::Null)
+        }
+        Action::WindowControl { operation } => control_window(app, &operation),
+        Action::Game { game } => Ok(json!(store.game(&game)?)),
         Action::Library => {
-            let mut query=store.db.prepare("SELECT g.data,json_extract(p.data,'$.name') FROM games g LEFT JOIN profiles p ON p.id=json_extract(g.data,'$.active') WHERE g.id NOT IN (SELECT id FROM excluded)")?;
+            let records = store.games()?;
+            if !records.iter().any(|g| g.id == "prism-launcher") {
+                if let Some(first) = records.iter().find(|g| g.platform == "Prism Launcher") {
+                    let launcher = Game {
+                        id: "prism-launcher".into(),
+                        name: "Prism Launcher".into(),
+                        platform: "Prism".into(),
+                        install: first.install.clone(),
+                        exe: None,
+                        maps: vec![],
+                        active: None,
+                        favorite: false,
+                        hidden: false,
+                        modified: 0,
+                        cover: false,
+                    };
+                    Store::put_game(&store.db, &launcher)?;
+                }
+            }
+            let mut query=store.db.prepare("SELECT g.data,json_extract(p.data,'$.name') FROM games g LEFT JOIN profiles p ON p.id=json_extract(g.data,'$.active') WHERE g.id NOT IN (SELECT id FROM excluded) AND json_extract(g.data,'$.platform') <> 'Prism Launcher'")?;
             let rows = query.query_map([], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
             })?;
@@ -421,6 +622,42 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
                 games.push(g);
             }
             Ok(json!(games))
+        }
+        Action::ManagedFiles { game } => {
+            let g = store.game(&game)?;
+            let roots = discovery::KnownFolders {
+                documents: app.path().document_dir().ok(),
+                roaming: app.path().data_dir().ok(),
+            };
+            let (_, candidates) = discovery::candidates(&g, &roots);
+            let managed: HashSet<_> = g
+                .maps
+                .iter()
+                .map(|m| m.destination())
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .collect();
+            let mut files = vec![];
+            for candidate in candidates {
+                for p in candidate.files {
+                    if !managed.contains(&fs::canonicalize(&p)?) {
+                        s.grants.files.insert(p.clone());
+                        if !files.contains(&p) {
+                            files.push(p);
+                        }
+                    }
+                }
+            }
+            Ok(json!(files))
+        }
+        Action::AddFiles { game, files } => {
+            ensure!(
+                files.iter().all(|p| s.grants.files.contains(p)),
+                "Select files through discovery or the file picker."
+            );
+            let mut g = store.game(&game)?;
+            store.add_files(&mut g, &files)?;
+            Ok(Value::Null)
         }
         Action::Suggestions { game } => {
             let g = store.game(&game)?;
@@ -481,7 +718,17 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
             }
             Ok(json!(count))
         }
-        Action::Recovery => Ok(json!(store.profiles(None, true)?)),
+        Action::Recovery => {
+            let names: std::collections::HashMap<_, _> =
+                store.games()?.into_iter().map(|g| (g.id, g.name)).collect();
+            let mut points = vec![];
+            for p in store.profiles(None, true)? {
+                let mut value = serde_json::to_value(&p)?;
+                value["gameName"] = json!(names.get(&p.game));
+                points.push(value);
+            }
+            Ok(json!(points))
+        }
         Action::Recover => Ok(json!(store.recover()?)),
         Action::Detail { game } => {
             let g = store.game(&game)?;
@@ -500,34 +747,8 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
             Ok(json!(profiles))
         }
         Action::Watch { game } => {
-            s.watcher = None;
-            if let Some(id) = game {
-                let g = store.game(&id)?;
-                let mut roots = HashSet::new();
-                let mut paths = HashSet::new();
-                for m in &g.maps {
-                    roots.insert(m.root.clone());
-                    paths.insert(m.destination()?);
-                }
-                let app = app.clone();
-                let mut w =
-                    notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                        let relevant = event.map_or(true, |e| {
-                            e.paths.is_empty()
-                                || e.paths.iter().any(|p| {
-                                    paths.contains(p)
-                                        || fs::canonicalize(p).is_ok_and(|f| paths.contains(&f))
-                                })
-                        });
-                        if relevant {
-                            let _ = app.emit("managed-files-changed", &id);
-                        }
-                    })?;
-                for root in roots {
-                    w.watch(&root, RecursiveMode::NonRecursive)?;
-                }
-                s.watcher = Some(w);
-            }
+            let _ = game;
+            crate::monitoring::refresh(s)?;
             Ok(Value::Null)
         }
         Action::Changes { game } => Ok(json!(store.changed(&store.game(&game)?)?)),
@@ -885,6 +1106,34 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
                 fs::write(tmp.path().join("baseline.json"), revision(&data)?)?;
                 fs::rename(tmp.path(), &folder)?;
             }
+            let baseline = folder.join("baseline.json");
+            check_path(&baseline, false)?;
+            let recorded =
+                read_file(&baseline)?.context("The profile edit baseline is missing.")?;
+            let hashes: Vec<Option<String>> = serde_json::from_slice(&recorded)?;
+            let current: Vec<_> = data.iter().map(|b| b.as_deref().map(digest)).collect();
+            if hashes.len() < current.len() {
+                ensure!(current.starts_with(&hashes),"The stored profile changed since this edit folder was opened. Duplicate the profile to start a fresh edit.");
+                for (i, m) in g.maps.iter().enumerate().skip(hashes.len()) {
+                    let dir = folder.join(i.to_string());
+                    check_path(&dir, true)?;
+                    if !dir.exists() {
+                        fs::create_dir(&dir)?;
+                    }
+                    let map = Mapping {
+                        root: fs::canonicalize(dir)?,
+                        name: m.name.clone(),
+                    };
+                    if read_file(&map.destination()?)?.is_none() {
+                        replace(&map, &None, &data[i])?;
+                    }
+                }
+                let marker = Mapping {
+                    root: fs::canonicalize(&folder)?,
+                    name: "baseline.json".into(),
+                };
+                replace(&marker, &Some(recorded), &Some(revision(&data)?))?;
+            }
             explorer(&folder)?;
             Ok(Value::Null)
         }
@@ -905,10 +1154,22 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
             );
             let previous_baseline = read_file(&baseline)?;
             ensure!(old==edits || previous_baseline.as_ref()==Some(&revision(&old)?),"The stored profile changed after this folder was opened. Duplicate the profile to start a fresh edit.");
+            if g.active.as_deref() == Some(&p.id) {
+                crate::switching::ensure_closed(&g)?;
+            }
             p.modified = now();
             let tx = store.db.transaction()?;
             Store::write(&tx, &p, &edits)?;
             tx.commit()?;
+            if g.active.as_deref() == Some(&p.id) {
+                let mut live = g.clone();
+                match store.apply(&mut live, &p.id, Decision::Check, None)? {
+                    crate::switching::Outcome::Unsaved { token, .. } => {
+                        store.apply(&mut live, &p.id, Decision::Discard, Some(&token))?;
+                    }
+                    crate::switching::Outcome::Applied => {}
+                }
+            }
             let marker = Mapping {
                 root: fs::canonicalize(folder)?,
                 name: "baseline.json".into(),
@@ -921,13 +1182,23 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
 
 #[tauri::command]
 pub async fn request(app: AppHandle, action: Action) -> Result<Value, String> {
+    if let Action::WindowControl { operation } = &action {
+        return control_window(&app, operation).map_err(|e| format!("{e:#}"));
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Mutex<Session>>();
         let mut s = state
             .lock()
             .map_err(|_| "The library is busy after a failure. Restart SConfig.".to_string())?;
+        let refresh = matches!(
+            &action,
+            Action::Scan | Action::Register { .. } | Action::AddFiles { .. } | Action::PrismFolder
+        );
         let kind = std::mem::discriminant(&action);
         let result = execute(&mut s, &app, action);
+        if refresh && result.is_ok() {
+            let _ = crate::monitoring::refresh(&mut s);
+        }
         if result.is_err() {
             if let Ok(mut f) = fs::OpenOptions::new()
                 .create(true)

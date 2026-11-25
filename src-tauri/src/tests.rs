@@ -425,7 +425,7 @@ fn prism_instances_capture_original_and_keep_separate_destinations() -> Result<(
         assert!(g.active.is_some());
     }
     crate::discovery::prism(&mut f.store, &root)?;
-    assert_eq!(f.store.games()?.len(), 3);
+    assert_eq!(f.store.games()?.len(), 4);
     Ok(())
 }
 
@@ -488,6 +488,162 @@ fn failed_workspace_import_preserves_source_and_leaves_no_partial_destination() 
     assert_eq!(
         f.store.load(&f.a, 2)?[0].as_deref(),
         Some(b"low".as_slice())
+    );
+    Ok(())
+}
+
+#[test]
+fn rust_discovery_groups_settings_bindings_and_favorites() -> Result<()> {
+    use crate::discovery::{candidates, configure, KnownFolders};
+    let mut f = Fixture::new()?;
+    let dir = f._temp.path().join("cfg");
+    fs::create_dir(&dir)?;
+    for name in [
+        "client.cfg",
+        "keys.cfg",
+        "favorites.cfg",
+        "keys_default.cfg",
+    ] {
+        fs::write(dir.join(name), name.as_bytes())?;
+    }
+    fs::write(dir.join("steam_autocloud.vdf"), b"launcher metadata")?;
+    fs::write(dir.join("unrelated.sav"), b"progress")?;
+    let mut g = f.g.clone();
+    g.id = "steam-252490".into();
+    g.name = "Rust".into();
+    g.install = f._temp.path().into();
+    g.maps.clear();
+    g.active = None;
+    fs::write(g.install.join("RustClient.exe"), b"")?;
+    Store::put_game(&f.store.db, &g)?;
+    let (exe, found) = candidates(
+        &g,
+        &KnownFolders {
+            documents: None,
+            roaming: None,
+        },
+    );
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].files.len(), 4);
+    configure(&mut f.store, &mut g, &found[0].files, exe.unwrap())?;
+    let original = f.store.profile(&g.id, g.active.as_deref().unwrap())?;
+    assert_eq!(original.count, 4);
+    assert_eq!(f.store.load(&original, 4)?.len(), 4);
+    assert!(!g
+        .maps
+        .iter()
+        .any(|m| m.name.ends_with(".vdf") || m.name.ends_with(".sav")));
+    Ok(())
+}
+#[test]
+fn added_files_are_captured_in_every_profile_and_swapped_together() -> Result<()> {
+    let mut f = Fixture::new()?;
+    let keys = f.first.with_file_name("keys.cfg");
+    let favorites = f.first.with_file_name("favorites.cfg");
+    fs::write(&keys, b"bind one")?;
+    fs::write(&favorites, b"server one")?;
+    f.store
+        .add_files(&mut f.g, &[keys.clone(), favorites.clone()])?;
+    let a = f.store.profile(&f.g.id, &f.a.id)?;
+    let b = f.store.profile(&f.g.id, &f.b.id)?;
+    assert_eq!(a.count, 4);
+    assert_eq!(b.count, 4);
+    assert_eq!(f.store.load(&b, 4)?[0].as_deref(), Some(b"high".as_slice()));
+    fs::write(&keys, b"bind two")?;
+    fs::write(&favorites, b"server two")?;
+    let c = f.store.create(&mut f.g, "All files", "", vec![], None)?;
+    let Outcome::Unsaved { token, files } =
+        f.store.apply(&mut f.g, &c.id, Decision::Check, None)?
+    else {
+        panic!("expected prompt")
+    };
+    assert_eq!(files.len(), 2);
+    f.store
+        .apply(&mut f.g, &c.id, Decision::Discard, Some(&token))?;
+    f.store.apply(&mut f.g, &b.id, Decision::Check, None)?;
+    assert_eq!(fs::read(&f.first)?, b"high");
+    assert_eq!(fs::read(&keys)?, b"bind one");
+    assert_eq!(fs::read(&favorites)?, b"server one");
+    f.store.apply(&mut f.g, &c.id, Decision::Check, None)?;
+    assert_eq!(fs::read(keys)?, b"bind two");
+    assert_eq!(fs::read(favorites)?, b"server two");
+    assert_eq!(f.store.load(&a, 4)?[0].as_deref(), Some(b"low".as_slice()));
+    Ok(())
+}
+#[test]
+fn old_recovery_points_preserve_files_added_after_the_backup() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.activate_b()?;
+    let old = f.store.profiles(None, true)?.remove(0);
+    let keys = f.first.with_file_name("keys.cfg");
+    fs::write(&keys, b"keys baseline")?;
+    f.store.add_files(&mut f.g, std::slice::from_ref(&keys))?;
+    fs::write(&keys, b"keys edited")?;
+    let Outcome::Unsaved { token, .. } = f.store.apply(&mut f.g, &old.id, Decision::Check, None)?
+    else {
+        panic!("expected prompt")
+    };
+    f.store
+        .apply(&mut f.g, &old.id, Decision::Discard, Some(&token))?;
+    assert_eq!(fs::read(f.first)?, b"low");
+    assert_eq!(fs::read(keys)?, b"keys edited");
+    assert_eq!(f.store.profile(&f.g.id, &old.id)?.count, 2);
+    Ok(())
+}
+#[test]
+fn adding_files_rolls_back_all_profiles_on_database_failure() -> Result<()> {
+    let mut f = Fixture::new()?;
+    let keys = f.first.with_file_name("keys.cfg");
+    fs::write(&keys, b"bind")?;
+    f.store.db.execute_batch(&format!("CREATE TEMP TRIGGER reject_added_file BEFORE INSERT ON files WHEN NEW.slot=2 AND NEW.profile='{}' BEGIN SELECT RAISE(ABORT,'simulated failure'); END;",f.a.id))?;
+    assert!(f
+        .store
+        .add_files(&mut f.g, std::slice::from_ref(&keys))
+        .is_err());
+    assert_eq!(f.g.maps.len(), 2);
+    assert_eq!(f.store.game(&f.g.id)?.maps.len(), 2);
+    assert_eq!(f.store.profile(&f.g.id, &f.b.id)?.count, 2);
+    assert_eq!(f.store.load(&f.b, 2)?.len(), 2);
+    assert_eq!(fs::read(keys)?, b"bind");
+    Ok(())
+}
+#[test]
+fn interrupted_restore_of_old_recovery_point_handles_expanded_file_set() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.activate_b()?;
+    let old = f.store.profiles(None, true)?.remove(0);
+    let keys = f.first.with_file_name("keys.cfg");
+    fs::write(&keys, b"keys baseline")?;
+    f.store.add_files(&mut f.g, std::slice::from_ref(&keys))?;
+    let backup = Store::make(&f.g, "Interrupted restore", true)?;
+    Store::write(&f.store.db, &backup, &capture(&f.g.maps)?)?;
+    f.store.db.execute(
+        "INSERT INTO journal VALUES(?,?,?)",
+        params![f.g.id, backup.id, old.id],
+    )?;
+    fs::write(&f.first, b"low")?;
+    let mut reopened = Store::open(&f.store.dir)?;
+    reopened.recover()?;
+    assert_eq!(fs::read(f.first)?, b"high");
+    assert_eq!(fs::read(keys)?, b"keys baseline");
+    reopened.ready(&f.g)?;
+    Ok(())
+}
+
+#[test]
+fn older_archives_keep_newly_managed_files_at_their_current_settings() -> Result<()> {
+    let mut f = Fixture::new()?;
+    let path = f._temp.path().join("older.zip");
+    archive::export(&path, &f.g, &f.a, &f.store.load(&f.a, 2)?)?;
+    let keys = f.first.with_file_name("keys.cfg");
+    fs::write(&keys, b"current keys")?;
+    f.store.add_files(&mut f.g, std::slice::from_ref(&keys))?;
+    let imported = archive::import(&path, &f.g)?;
+    assert_eq!(imported.data.len(), 3);
+    assert_eq!(imported.data[0].as_deref(), Some(b"low".as_slice()));
+    assert_eq!(
+        imported.data[2].as_deref(),
+        Some(b"current keys".as_slice())
     );
     Ok(())
 }

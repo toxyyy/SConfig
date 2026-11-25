@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod desktop;
+mod monitoring;
 use sconfig::{archive, discovery, files, migration, storage, switching};
 use std::sync::Mutex;
 use tauri::Manager;
@@ -43,18 +44,22 @@ fn main() {
                 migration::import_workspace(&previous, &dir)?;
             }
             let store = storage::Store::open(&dir)?;
+            let (changes,receiver)=std::sync::mpsc::channel();
             app.manage(Mutex::new(desktop::Session {
                 store,
                 grants: Default::default(),
                 watcher: None,
+                changes,
             }));
+            monitoring::start(app.handle().clone(),receiver);
             let window = app
                 .config()
                 .app
                 .windows
                 .first()
                 .ok_or("Missing main window configuration")?;
-            tauri::WebviewWindowBuilder::from_config(app.handle(), window)?.build()?;
+            let window=tauri::WebviewWindowBuilder::from_config(app.handle(), window)?.build()?;
+            window.set_icon(tauri::image::Image::new_owned(include_bytes!("../icons/sconfig.rgba").to_vec(),128,128))?;
             Ok(())
         })
         .on_window_event(|window, event| {

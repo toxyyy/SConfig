@@ -14,7 +14,7 @@ import {
   Star,
   SwitchCamera,
 } from "lucide-react";
-import { Cover, ContextMenu, Modal } from "./components";
+import { Cover, ContextMenu } from "./components";
 import { call, type Game, type Profile, type Run } from "./api";
 export type Scope = "Library" | "Hidden";
 export function Library({
@@ -29,6 +29,7 @@ export function Library({
   quick,
   busy,
   size,
+  remove,
 }: {
   games: Game[];
   scope: Scope;
@@ -41,6 +42,7 @@ export function Library({
   quick: (g: Game, p: Profile) => void;
   busy: boolean;
   size: string;
+  remove: (game: Game) => void;
 }) {
   const [view, setView] = useState(localStorage.getItem("view") || "grid"),
     [sort, setSort] = useState(localStorage.getItem("sort") || "name");
@@ -52,7 +54,8 @@ export function Library({
       games
         .filter(
           (g) =>
-            (scope === "Hidden" ? g.hidden : !g.hidden) &&
+            (query.trim().length > 0 ||
+              (scope === "Hidden" ? g.hidden : !g.hidden)) &&
             g.name.toLowerCase().includes(query.toLowerCase()) &&
             (filter === "All games" ||
               (filter === "Configured") === !!g.maps.length),
@@ -66,7 +69,6 @@ export function Library({
         ),
     [games, scope, query, sort, filter],
   );
-  const [removing, setRemoving] = useState<Game | null>(null);
   const [point, setPoint] = useState({ x: 0, y: 0 });
   function context(g: Game, x: number, y: number) {
     setPoint({ x, y });
@@ -84,11 +86,13 @@ export function Library({
       <div className="page-head">
         <div>
           <h1>
-            {scope === "Library"
-              ? "Game library"
-              : scope === "Hidden"
-                ? "Hidden games"
-                : "Favorites"}
+            {query.trim()
+              ? "Search results"
+              : scope === "Library"
+                ? "Game library"
+                : scope === "Hidden"
+                  ? "Hidden games"
+                  : "Favorites"}
           </h1>
         </div>
         <div className="row">
@@ -158,6 +162,17 @@ export function Library({
               key={g.id}
               className="game-card"
               data-game-id={g.id}
+              onPointerMove={(e) => {
+                const b = e.currentTarget.getBoundingClientRect();
+                e.currentTarget.style.setProperty(
+                  "--spot-x",
+                  e.clientX - b.left + "px",
+                );
+                e.currentTarget.style.setProperty(
+                  "--spot-y",
+                  e.clientY - b.top + "px",
+                );
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 context(g, e.clientX, e.clientY);
@@ -171,16 +186,23 @@ export function Library({
                 <Cover game={g} />
                 <div className="card-info">
                   <small>{g.platform}</small>
-                  <h3>{g.name}</h3>
+                  <h3>
+                    {g.name}
+                    {g.hidden && query.trim() && (
+                      <small className="hidden-label">Hidden</small>
+                    )}
+                  </h3>
                   <span
                     className={"status " + (g.maps.length ? "managed" : "")}
                   >
                     <i />
-                    {g.active
-                      ? g.activeName || "Active configuration"
-                      : g.maps.length
-                        ? "Configured"
-                        : "Needs setup"}
+                    {g.id === "prism-launcher"
+                      ? "Browse instances"
+                      : g.active
+                        ? g.activeName || "Active configuration"
+                        : g.maps.length
+                          ? "Configured"
+                          : "Needs setup"}
                   </span>
                 </div>
               </button>
@@ -281,7 +303,7 @@ export function Library({
           <button
             className="danger"
             onClick={() => {
-              setRemoving(menu);
+              remove(menu);
               setMenu(null);
             }}
           >
@@ -309,29 +331,6 @@ export function Library({
             </>
           )}
         </ContextMenu>
-      )}
-      {removing && (
-        <Modal title="Remove game?" close={() => setRemoving(null)}>
-          <p>
-            Remove {removing.name} from the library? Stored profiles are kept.
-            You can restore the game from Settings.
-          </p>
-          <div className="modal-actions">
-            <button onClick={() => setRemoving(null)}>Cancel</button>
-            <button
-              className="danger"
-              onClick={() =>
-                void run(async () => {
-                  await call("flag", { game: removing.id, flag: "removed" });
-                  setRemoving(null);
-                  await refresh();
-                })
-              }
-            >
-              Remove game
-            </button>
-          </div>
-        </Modal>
       )}
     </>
   );

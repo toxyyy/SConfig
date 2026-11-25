@@ -80,7 +80,7 @@ pub fn import(path: &Path, g: &Game) -> Result<Imported> {
         serde_json::from_slice(&bytes)?
     };
     ensure!(
-        manifest.version == 1 && manifest.files.len() == g.maps.len(),
+        manifest.version == 1 && !manifest.files.is_empty() && manifest.files.len() <= g.maps.len(),
         "Incompatible archive version or file count."
     );
     let mut expected = std::collections::HashSet::from(["manifest.json".to_owned()]);
@@ -122,6 +122,16 @@ pub fn import(path: &Path, g: &Game) -> Result<Imported> {
             "Unsafe or repeated archive entry."
         );
     }
+    let remaining = capture(&g.maps[data.len()..])?;
+    ensure!(
+        remaining.iter().all(Option::is_some),
+        "Restore the newly managed files before importing an older archive."
+    );
+    data.extend(remaining);
+    ensure!(
+        data.iter().flatten().map(Vec::len).sum::<usize>() <= MAX_TOTAL,
+        "Imported configuration exceeds 64 MiB."
+    );
     Ok(Imported {
         name: title(&manifest.name)?,
         description: manifest.description,

@@ -68,6 +68,7 @@ impl Store {
           CREATE TABLE IF NOT EXISTS files(profile TEXT REFERENCES profiles(id) ON DELETE CASCADE,slot INTEGER NOT NULL,bytes BLOB,hash TEXT,PRIMARY KEY(profile,slot));
           CREATE TABLE IF NOT EXISTS journal(game TEXT PRIMARY KEY,backup TEXT NOT NULL REFERENCES profiles(id),target TEXT NOT NULL REFERENCES profiles(id));
           CREATE TABLE IF NOT EXISTS excluded(id TEXT PRIMARY KEY);
+          CREATE TABLE IF NOT EXISTS prism_meta(game TEXT PRIMARY KEY REFERENCES games(id),data TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY,bytes BLOB NOT NULL);
           CREATE TABLE IF NOT EXISTS prefs(key TEXT PRIMARY KEY,value INTEGER NOT NULL);")?;
         Ok(Self {
@@ -143,7 +144,10 @@ impl Store {
             );
             data.push(bytes);
         }
-        ensure!(data.len() == count, "Snapshot is missing file mappings.");
+        ensure!(
+            data.len() == count && p.count == count,
+            "Snapshot is missing file mappings."
+        );
         Ok(data)
     }
     pub fn write(db: &Connection, p: &Profile, data: &Contents) -> Result<()> {
@@ -234,6 +238,62 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    pub fn add_files(&mut self, g: &mut Game, files: &[PathBuf]) -> Result<()> {
+        self.ready(g)?;
+        ensure!(!files.is_empty(), "Select configuration files to add.");
+        let mut updated = g.clone();
+        let mut destinations = std::collections::HashSet::new();
+        for m in &g.maps {
+            destinations.insert(m.destination()?.to_string_lossy().to_lowercase());
+        }
+        let executable = g.exe.as_deref().and_then(|p| std::fs::canonicalize(p).ok());
+        let mut additions = vec![];
+        for path in files {
+            let mapping = Mapping::select(path, &self.dir)?;
+            let dest = mapping.destination()?;
+            ensure!(
+                executable.as_ref() != Some(&dest),
+                "The game executable cannot be managed as a configuration."
+            );
+            if destinations.insert(dest.to_string_lossy().to_lowercase()) {
+                additions.push(mapping);
+            }
+        }
+        ensure!(!additions.is_empty(), "These files are already managed.");
+        updated.maps.extend(additions.iter().cloned());
+        ensure!(
+            updated.maps.len() <= MAX_FILES,
+            "A game can manage up to 128 files."
+        );
+        capture(&updated.maps)?;
+        let baseline = capture(&additions)?;
+        ensure!(
+            baseline.iter().all(Option::is_some),
+            "A newly selected file is missing."
+        );
+        let mut snapshots = vec![];
+        for mut profile in self.profiles(Some(&g.id), false)? {
+            let mut bytes = self.load(&profile, g.maps.len())?;
+            bytes.extend(baseline.iter().cloned());
+            ensure!(
+                bytes.iter().flatten().map(Vec::len).sum::<usize>() <= MAX_TOTAL,
+                "An extended profile exceeds 64 MiB."
+            );
+            profile.count = updated.maps.len();
+            profile.modified = now();
+            snapshots.push((profile, bytes));
+        }
+        updated.modified = now();
+        let tx = self.db.transaction()?;
+        for (profile, bytes) in &snapshots {
+            Self::write(&tx, profile, bytes)?;
+        }
+        // Existing recovery points keep their original file coverage.
+        Self::put_game(&tx, &updated)?;
+        tx.commit()?;
+        *g = updated;
+        Ok(())
+    }
     pub fn save(&mut self, g: &Game) -> Result<()> {
         self.ready(g)?;
         let mut p = self.profile(&g.id, g.active.as_deref().context("No active profile.")?)?;
@@ -243,6 +303,53 @@ impl Store {
         Self::write(&tx, &p, &data)?;
         tx.commit()?;
         Ok(())
+    }
+    pub fn auto_save(&mut self, expected: &Game, bytes: &Contents) -> Result<bool> {
+        let g = self.game(&expected.id)?;
+        self.ready(&g)?;
+        ensure!(
+            g.active == expected.active && g.maps == expected.maps,
+            "The active configuration changed while settings were being saved."
+        );
+        ensure!(
+            bytes.len() == g.maps.len() && bytes.iter().all(Option::is_some),
+            "Waiting for all configuration files to finish writing."
+        );
+        ensure!(
+            capture(&g.maps)? == *bytes,
+            "Settings are still being written."
+        );
+        let Some(id) = &g.active else {
+            return Ok(false);
+        };
+        let mut profile = self.profile(&g.id, id)?;
+        let previous = self.load(&profile, g.maps.len())?;
+        if previous == *bytes {
+            return Ok(false);
+        }
+        let last = self
+            .profiles(Some(&g.id), true)?
+            .iter()
+            .filter(|p| p.name == "Before automatic save")
+            .map(|p| p.created)
+            .max()
+            .unwrap_or(0);
+        let recovery = (now() - last >= 30_000)
+            .then(|| Self::make(&g, "Before automatic save", true))
+            .transpose()?;
+        let retention = self.retain()?;
+        let mut updated = g.clone();
+        updated.modified = now();
+        profile.modified = now();
+        let tx = self.db.transaction()?;
+        if let Some(point) = recovery {
+            Self::write(&tx, &point, &previous)?;
+        }
+        Self::write(&tx, &profile, bytes)?;
+        Self::put_game(&tx, &updated)?;
+        tx.execute("DELETE FROM profiles WHERE id IN (SELECT id FROM profiles WHERE game=? AND recovery=1 AND id NOT IN (SELECT backup FROM journal UNION SELECT target FROM journal) ORDER BY rowid DESC LIMIT -1 OFFSET ?)",params![g.id,retention])?;
+        tx.commit()?;
+        Ok(true)
     }
     pub fn changed(&self, g: &Game) -> Result<Vec<String>> {
         let Some(pid) = &g.active else {

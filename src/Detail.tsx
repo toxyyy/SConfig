@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Overview } from "./Overview";
 import { listen } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
@@ -61,7 +62,6 @@ export function Detail({
   bulk,
 }: Props) {
   const [menu, setMenu] = useState<Profile | null>(null),
-    [showFiles, setShowFiles] = useState(false),
     [importPath, setImportPath] = useState(""),
     [compare, setCompare] = useState(false),
     [first, setFirst] = useState(""),
@@ -79,6 +79,27 @@ export function Detail({
     [peers, setPeers] = useState<Game[]>([]),
     [selected, setSelected] = useState<string[]>([]);
   const [activateCopies, setActivateCopies] = useState(true);
+  const [fileDialog, setFileDialog] = useState(false),
+    [detectedFiles, setDetectedFiles] = useState<string[]>([]),
+    [addedFiles, setAddedFiles] = useState<string[]>([]),
+    [fileError, setFileError] = useState("");
+  useEffect(() => {
+    let open = true;
+    call<string[]>("managedFiles", { game: g.id })
+      .then((paths) => {
+        if (open) {
+          setDetectedFiles(paths);
+          setAddedFiles(paths);
+          setFileError("");
+        }
+      })
+      .catch((e) => {
+        if (open) setFileError(String(e));
+      });
+    return () => {
+      open = false;
+    };
+  }, [g.id, g.maps.length]);
   const active = profiles.find((p) => p.id === g.active);
   const [importing, setImporting] = useState(false),
     [sources, setSources] = useState<string[]>([]),
@@ -125,12 +146,17 @@ export function Detail({
         {g.maps.length > 0 && (
           <div className="file-bar">
             <button
-              onClick={() => setShowFiles(!showFiles)}
-              aria-expanded={showFiles}
+              onClick={() => setFileDialog(true)}
+              aria-haspopup="dialog"
+              title="Manage configuration files"
             >
               <FileCog />
               {g.maps.length} managed {g.maps.length === 1 ? "file" : "files"}
-              <ChevronDown />
+              {detectedFiles.length > 0 ? (
+                <span className="count">+{detectedFiles.length}</span>
+              ) : (
+                <ChevronDown />
+              )}
             </button>
             <button
               className="icon"
@@ -166,25 +192,6 @@ export function Detail({
             Dismiss
           </button>
         </div>
-      )}
-      {showFiles && (
-        <ul className="path-list">
-          {g.maps.map((m, i) => (
-            <li key={i}>
-              {shortPath(m.root)}\{m.name}
-              <button
-                className="icon"
-                title="Open containing folder"
-                aria-label={"Open folder for " + m.name}
-                onClick={() =>
-                  void run(() => call("openFolder", { game: g.id, slot: i }))
-                }
-              >
-                <FolderOpen />
-              </button>
-            </li>
-          ))}
-        </ul>
       )}
       {!!changes.length && (
         <div className="change-bar">
@@ -296,14 +303,8 @@ export function Detail({
                   </button>
                 </div>
                 {p.description && <p>{p.description}</p>}
-                <dl className="overview">
-                  {p.overview?.map((v) => (
-                    <div key={v.label}>
-                      <dt>{v.label}</dt>
-                      <dd>{v.value}</dd>
-                    </div>
-                  ))}
-                </dl>
+                <Overview values={p.overview} />
+
                 <div className="tags">
                   {p.tags.map((t, i) => (
                     <span key={i}>{t}</span>
@@ -354,6 +355,107 @@ export function Detail({
             Set up game
           </button>
         </div>
+      )}
+      {fileDialog && (
+        <Modal
+          title="Managed configuration files"
+          close={() => setFileDialog(false)}
+          busy={busy}
+        >
+          <details>
+            <summary>
+              {g.maps.length} files currently saved with each profile
+            </summary>
+            <ul className="path-list">
+              {g.maps.map((m, i) => (
+                <li key={i}>
+                  {shortPath(m.root)}
+                  {String.fromCharCode(92)}
+                  {m.name}
+                  <button
+                    className="icon"
+                    aria-label={"Open folder for " + m.name}
+                    onClick={() =>
+                      void run(() =>
+                        call("openFolder", { game: g.id, slot: i }),
+                      )
+                    }
+                  >
+                    <FolderOpen />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </details>
+          <h4>
+            {detectedFiles.length
+              ? "Additional files detected"
+              : "Add configuration files"}
+          </h4>
+          {fileError && <p role="alert">{fileError}</p>}
+          {addedFiles.map((path) => (
+            <label className="check-row" key={path}>
+              <input
+                type="checkbox"
+                checked={true}
+                onChange={() =>
+                  setAddedFiles(addedFiles.filter((p) => p !== path))
+                }
+              />
+              <span>{shortPath(path)}</span>
+            </label>
+          ))}
+          {detectedFiles
+            .filter((p) => !addedFiles.includes(p))
+            .map((path) => (
+              <label className="check-row" key={path}>
+                <input
+                  type="checkbox"
+                  checked={false}
+                  onChange={() => setAddedFiles([...addedFiles, path])}
+                />
+                <span>{shortPath(path)}</span>
+              </label>
+            ))}
+          <button
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                const paths = await pick("files", g.id);
+                setAddedFiles((old) => [...new Set([...old, ...paths])]);
+              })
+            }
+          >
+            <FolderOpen />
+            Choose more files…
+          </button>
+          <p className="hint">
+            Current contents of the added files will be saved into every
+            existing configuration profile. Their earlier contents were never
+            captured. Older recovery points will continue to restore only the
+            files they originally backed up.
+          </p>
+          <div className="modal-actions">
+            <button disabled={busy} onClick={() => setFileDialog(false)}>
+              Cancel
+            </button>
+            <button
+              className="primary"
+              disabled={busy || !addedFiles.length}
+              onClick={() =>
+                void run(async () => {
+                  await call("addFiles", { game: g.id, files: addedFiles });
+                  setFileDialog(false);
+                  setAddedFiles([]);
+                  await reload();
+                  notice("Configuration files added to every profile.");
+                })
+              }
+            >
+              Add files to profiles
+            </button>
+          </div>
+        </Modal>
       )}
       {menu && (
         <ContextMenu point={point} close={() => setMenu(null)}>
@@ -613,7 +715,8 @@ export function Detail({
         >
           <p>
             The imported profile will use these destinations when activated.
-            Filenames must match the archive in this order.
+            Filenames must match the archive in this order. If the archive
+            covers fewer files, the remaining files use their current contents.
           </p>
           <ol className="paths">
             {g.maps.map((m, i) => (

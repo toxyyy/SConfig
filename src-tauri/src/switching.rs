@@ -39,8 +39,14 @@ impl Store {
         self.ready(g)?;
         ensure_closed(g)?;
         let target = self.profile(&g.id, pid)?;
-        let stage = self.load(&target, g.maps.len())?;
+        ensure!(
+            target.count == g.maps.len() || (target.recovery && target.count < g.maps.len()),
+            "Snapshot has incompatible file coverage."
+        );
+        let mut stage = self.load(&target, target.count)?;
         let live = capture(&g.maps)?;
+        // Recovery points made before adding files leave those newer files as they are.
+        stage.extend_from_slice(&live[stage.len()..]);
         let active = g
             .active
             .as_ref()
@@ -139,7 +145,13 @@ impl Store {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let backup = self.load(&self.profile(&g.id, &bid)?, g.maps.len())?;
-        let stage = self.load(&self.profile(&g.id, &tid)?, g.maps.len())?;
+        let target = self.profile(&g.id, &tid)?;
+        ensure!(
+            target.count == g.maps.len() || (target.recovery && target.count < g.maps.len()),
+            "Snapshot has incompatible file coverage."
+        );
+        let mut stage = self.load(&target, target.count)?;
+        stage.extend_from_slice(&backup[stage.len()..]);
         for (i, map) in g.maps.iter().enumerate().rev() {
             let current = read_file(&map.destination()?)?;
             if current == backup[i] {
@@ -185,7 +197,7 @@ impl Store {
     }
 }
 
-fn ensure_closed(g: &Game) -> Result<()> {
+pub fn ensure_closed(g: &Game) -> Result<()> {
     game_closed(g.exe.as_deref().context("Select the game executable.")?)?;
     if g.platform == "Prism Launcher" {
         for exe in ["java.exe", "javaw.exe"] {

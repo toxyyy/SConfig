@@ -14,7 +14,8 @@ export type Game = {
   cover: boolean;
 };
 export type Profile = {
-  overview?: { label: string; value: string }[];
+  gameName?: string;
+  overview?: { label: string; value: string; group?: string }[];
   thumbnail?: string | null;
   id: string;
   game: string;

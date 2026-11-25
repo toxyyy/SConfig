@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Component,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -34,11 +41,13 @@ import {
 } from "./api";
 import { Modal, ProfileForm, Setup } from "./components";
 import { Library, type Scope } from "./Library";
+import { PrismPage } from "./PrismPage";
 import { Detail } from "./Detail";
 import "./style.css";
 import logo from "./logo.png";
 import { presets, parseTheme, applyTheme, type Theme } from "./themes";
-type Page = Scope | "Recovery" | "Settings";
+type Page = Scope | "Recovery" | "Settings" | "Prism";
+type Route = { page: Page; id: string | null; query: string };
 type Dialog =
   | { type: "setup"; game?: Game }
   | { type: "form"; p?: Profile; duplicate?: boolean }
@@ -58,7 +67,7 @@ function App() {
   const [query, setQuery] = useState(""),
     [retention, setRetention] = useState(20),
     [size, setSize] = useState(localStorage.getItem("covers") || "medium");
-  const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark"),
+  const [theme, setTheme] = useState(localStorage.getItem("theme") || "oled"),
     [report, setReport] = useState<string[]>([]);
   const [custom, setCustom] = useState<Theme | null>(() => {
     try {
@@ -67,6 +76,13 @@ function App() {
       return null;
     }
   });
+  const [autoSaveWarning, setAutoSaveWarning] = useState("");
+  useEffect(() => {
+    if (autoSaveWarning) {
+      const timer = setTimeout(() => setAutoSaveWarning(""), 9000);
+      return () => clearTimeout(timer);
+    }
+  }, [autoSaveWarning]);
   const [themeJson, setThemeJson] = useState("");
   const [removedGames, setRemovedGames] = useState<Game[]>([]);
   useEffect(() => {
@@ -75,6 +91,18 @@ function App() {
         .then(setRemovedGames)
         .catch((e) => setErr(String(e)));
   }, [page]);
+  const [undoRemoved, setUndoRemoved] = useState<{
+    game: Game;
+    expires: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!undoRemoved) return;
+    const t = setTimeout(
+      () => setUndoRemoved(null),
+      Math.max(0, undoRemoved.expires - Date.now()),
+    );
+    return () => clearTimeout(t);
+  }, [undoRemoved]);
   const current = useRef<string | null>(null),
     locked = useRef(false),
     search = useRef<HTMLInputElement>(null);
@@ -87,8 +115,7 @@ function App() {
   const refreshDetail = useCallback(async (game: string) => {
     const data = await call<Profile[]>("detail", { game });
     if (current.current === game) setProfiles(data);
-    const dirty = await call<string[]>("changes", { game });
-    if (current.current === game) setChanges(dirty);
+    if (current.current === game) setChanges([]);
   }, []);
   async function reload() {
     await refreshGames();
@@ -137,84 +164,107 @@ function App() {
     }
   }, [toast]);
   useEffect(() => {
-    let cancelled = false,
-      timer: ReturnType<typeof setTimeout> | undefined,
-      unlisten: (() => void) | undefined;
-    if (id) {
-      const check = async (retry = true) => {
-        try {
-          const next = await call<string[]>("changes", { game: id });
-          if (!cancelled) setChanges(next);
-        } catch (e) {
-          if (!cancelled) {
-            if (retry) timer = setTimeout(() => void check(false), 750);
-            else setErr(String(e));
-          }
-        }
-      };
-      listen<string>("managed-files-changed", (e) => {
-        if (e.payload === id && !cancelled) {
-          clearTimeout(timer);
-          timer = setTimeout(() => void check(), 350);
-        }
-      })
-        .then((f) => {
-          if (cancelled) f();
-          else unlisten = f;
-        })
-        .catch((e) => {
-          if (!cancelled) setErr(String(e));
-        });
-      call("watch", { game: id })
-        .then(() => {
-          if (!cancelled) void check();
-        })
-        .catch((e) => {
-          if (!cancelled) setErr(String(e));
-        });
-    } else call("watch", { game: null }).catch(() => {});
+    let alive = true;
+    const updates = listen<string>("profile-auto-saved", (e) => {
+      if (!alive) return;
+      if (current.current === e.payload)
+        void refreshDetail(e.payload).catch((e) => setErr(String(e)));
+      void refreshGames().catch((e) => setErr(String(e)));
+    });
+    const errors = listen<{ game: string; message: string }>(
+      "auto-save-error",
+      (e) => {
+        if (alive) setAutoSaveWarning(e.payload.message);
+      },
+    );
     return () => {
-      cancelled = true;
-      clearTimeout(timer);
-      unlisten?.();
+      alive = false;
+      void updates.then((off) => off());
+      void errors.then((off) => off());
     };
-  }, [id, g?.maps.length]);
-  function navigate(p: Page) {
-    current.current = null;
-    setId(null);
-    setPage(p);
-    setQuery("");
+  }, [refreshDetail, refreshGames]);
+  function route(next: Route, push = true) {
+    if (push && JSON.stringify(history.state) !== JSON.stringify(next))
+      history.pushState(next, "", location.href);
+    current.current = next.id;
+    setId(next.id);
+    setPage(next.page);
+    setQuery(next.query);
     setDialog(null);
-  }
-  async function enter(game: string) {
-    current.current = game;
     setProfiles([]);
     setChanges([]);
-    setId(game);
-    setPage("Library");
+    if (next.id) void refreshDetail(next.id).catch((e) => setErr(String(e)));
+  }
+  useEffect(() => {
+    history.replaceState(
+      { page: "Library", id: null, query: "" },
+      "",
+      location.href,
+    );
+    const pop = (e: PopStateEvent) =>
+      route(e.state || { page: "Library", id: null, query: "" }, false);
+    const block = (e: MouseEvent) => {
+      if (e.button === 3 || e.button === 4) e.preventDefault();
+    };
+    const mouse = (e: MouseEvent) => {
+      if (e.button === 3 || e.button === 4) {
+        e.preventDefault();
+        if (!document.querySelector("dialog[open]")) {
+          if (e.button === 3) history.back();
+          else history.forward();
+        }
+      }
+    };
+    window.addEventListener("popstate", pop);
+    window.addEventListener("mousedown", block);
+    window.addEventListener("mouseup", mouse);
+    window.addEventListener("auxclick", block);
+    return () => {
+      window.removeEventListener("popstate", pop);
+      window.removeEventListener("mousedown", block);
+      window.removeEventListener("mouseup", mouse);
+      window.removeEventListener("auxclick", block);
+    };
+  }, []);
+  function navigate(p: Page) {
+    route({ page: p, id: null, query: "" });
+  }
+  async function enter(game: string) {
+    if (game === "prism-launcher") {
+      route({ page: "Prism", id: null, query: "" });
+      return;
+    }
+    route({ page: "Library", id: game, query: "" });
     await refreshDetail(game);
   }
+  const back = () => {
+    if (history.state && history.length > 1) history.back();
+    else navigate("Library");
+  };
   async function activate(
     game: Game,
     p: Profile,
     decision: Decision = "check",
     token?: string,
   ) {
-    const out = await call<Outcome>("activate", {
+    if (decision === "check") await call("flush", { game: game.id });
+    let out = await call<Outcome>("activate", {
       game: game.id,
       profile: p.id,
       decision,
       token,
     });
     if (out.status === "unsaved") {
-      setDialog({
-        type: "dirty",
-        g: game,
-        p,
+      out = await call<Outcome>("activate", {
+        game: game.id,
+        profile: p.id,
+        decision: "save",
         token: out.token,
-        files: out.files,
       });
-      return;
+      if (out.status === "unsaved")
+        throw Error(
+          "Settings are still changing. Try again when the game or editor finishes writing.",
+        );
     }
     setDialog(null);
     await reload();
@@ -245,7 +295,7 @@ function App() {
     }
     if (e.altKey && e.key === "ArrowLeft" && id) {
       e.preventDefault();
-      navigate("Library");
+      back();
     }
   }
   useEffect(() => {
@@ -264,536 +314,669 @@ function App() {
     </button>
   );
   return (
-    <div className="shell">
-      <aside>
-        <div className="brand">
-          <span>
-            <img src={logo} alt="" />
-          </span>
-          SConfig
+    <>
+      <div
+        className="window-chrome"
+        onPointerDown={(e) => {
+          if (e.button === 0 && e.target === e.currentTarget)
+            void call("windowControl", { operation: "drag" });
+        }}
+        onDoubleClick={(e) => {
+          if (e.target === e.currentTarget)
+            void call("windowControl", { operation: "maximize" });
+        }}
+      >
+        <div className="window-buttons">
+          {["minimize", "maximize", "close"].map((operation) => (
+            <button
+              key={operation}
+              aria-label={operation + " window"}
+              title={operation}
+              onClick={() => void call("windowControl", { operation })}
+            >
+              {operation === "minimize"
+                ? "−"
+                : operation === "maximize"
+                  ? "□"
+                  : "×"}
+            </button>
+          ))}
         </div>
-        <nav aria-label="Collection">
-          <h4>Workspace</h4>
-          {nav("Library", LibraryBig, games.filter((g) => !g.hidden).length)}
-          {nav("Hidden", EyeOff)}
-        </nav>
-        <nav aria-label="Data management">
-          <h4>Management</h4>
-          {nav("Recovery", ArchiveRestore)}
-          {nav("Settings", Settings2)}
-        </nav>
-      </aside>
-      <main>
-        <header>
-          <div className="crumb">
-            <Monitor />
-            {page === "Library" ? "Library" : page}
-            {g && (
-              <>
-                <ChevronRight />
-                {g.name}
-              </>
-            )}
+      </div>
+      <div className="shell">
+        <aside>
+          <div className="brand">
+            <span>
+              <img src={logo} alt="" />
+            </span>
+            SConfig
           </div>
-          <div className="search">
-            <Search />
-            <input
-              ref={search}
-              aria-label="Search library"
-              placeholder="Search games…"
-              value={query}
-              onChange={(e) => {
-                if (id || page === "Recovery" || page === "Settings")
-                  navigate("Library");
-                setQuery(e.target.value);
-              }}
-            />
-            <kbd>Ctrl F</kbd>
-          </div>
-          <button
-            className="icon"
-            title="Settings"
-            aria-label="Open settings"
-            onClick={() => navigate("Settings")}
-          >
-            <Settings2 />
-          </button>
-        </header>
-        <div className="content" aria-busy={busy}>
-          {busy && (
-            <div className="progress" role="status" aria-label="Working" />
-          )}
-          {!!report.length && (
-            <div className="change-bar">
-              <div>
-                {report.map((s) => (
-                  <p key={s}>{s}</p>
-                ))}
-              </div>
-              <button onClick={() => setReport([])}>Dismiss</button>
+          <nav aria-label="Collection">
+            <h4>Workspace</h4>
+            {nav("Library", LibraryBig, games.filter((g) => !g.hidden).length)}
+            {nav("Hidden", EyeOff)}
+          </nav>
+          <nav aria-label="Data management">
+            <h4>Management</h4>
+            {nav("Recovery", ArchiveRestore)}
+            {nav("Settings", Settings2)}
+          </nav>
+        </aside>
+        <main>
+          <header>
+            <div className="crumb">
+              <Monitor />
+              <button onClick={() => navigate("Library")}>Library</button>
+              {page !== "Library" && !g && (
+                <>
+                  <ChevronRight />
+                  {page}
+                </>
+              )}
+              {g && (
+                <>
+                  <ChevronRight />
+                  {g.name}
+                </>
+              )}
             </div>
-          )}
-          {g ? (
-            <Detail
-              key={g.id}
-              game={g}
-              profiles={profiles}
-              bulk={async (pairs) => {
-                switchQueue.current = pairs;
-                const first = switchQueue.current.shift();
-                if (first) await activate(first.game, first.profile);
-              }}
-              changes={changes}
-              busy={busy}
-              back={() => navigate("Library")}
-              setup={() => setDialog({ type: "setup", game: g })}
-              form={(p, duplicate) => setDialog({ type: "form", p, duplicate })}
-              activate={(p) => void run(() => activate(g, p))}
-              remove={(p) => setDialog({ type: "delete", p })}
-              run={run}
-              reload={reload}
-              notice={setToast}
-            />
-          ) : page === "Recovery" ? (
-            <>
-              <div className="page-head">
+            <div className="search">
+              <Search />
+              <input
+                ref={search}
+                aria-label="Search library"
+                placeholder="Search games…"
+                value={query}
+                onChange={(e) => {
+                  if (id || !["Library", "Hidden"].includes(page))
+                    navigate("Library");
+                  setQuery(e.target.value);
+                  history.replaceState(
+                    { ...history.state, query: e.target.value },
+                    "",
+                    location.href,
+                  );
+                }}
+              />
+              <kbd>Ctrl F</kbd>
+            </div>
+            <button
+              className="icon"
+              title="Settings"
+              aria-label="Open settings"
+              onClick={() => navigate("Settings")}
+            >
+              <Settings2 />
+            </button>
+          </header>
+          <div className="content" aria-busy={busy}>
+            {busy && (
+              <div className="progress" role="status" aria-label="Working" />
+            )}
+            {!!report.length && (
+              <div className="change-bar">
                 <div>
-                  <h1>Recovery points</h1>
+                  {report.map((s) => (
+                    <p key={s}>{s}</p>
+                  ))}
                 </div>
+                <button onClick={() => setReport([])}>Dismiss</button>
+              </div>
+            )}
+            {page === "Prism" ? (
+              <PrismPage
+                error={setErr}
+                run={run}
+                busy={busy}
+                back={() => navigate("Library")}
+                notice={setToast}
+              />
+            ) : g ? (
+              <Detail
+                key={g.id}
+                game={g}
+                profiles={profiles}
+                bulk={async (pairs) => {
+                  switchQueue.current = pairs;
+                  const first = switchQueue.current.shift();
+                  if (first) await activate(first.game, first.profile);
+                }}
+                changes={changes}
+                busy={busy}
+                back={back}
+                setup={() => setDialog({ type: "setup", game: g })}
+                form={(p, duplicate) =>
+                  setDialog({ type: "form", p, duplicate })
+                }
+                activate={(p) => void run(() => activate(g, p))}
+                remove={(p) => setDialog({ type: "delete", p })}
+                run={run}
+                reload={reload}
+                notice={setToast}
+              />
+            ) : page === "Recovery" ? (
+              <>
+                <div className="page-head">
+                  <div>
+                    <h1>Recovery points</h1>
+                  </div>
+                  <button
+                    onClick={() =>
+                      void run(async () => {
+                        const r = await call<string[]>("recover");
+                        setReport(r);
+                        await reload();
+                        if (!r.length)
+                          setToast("No interrupted switches found.");
+                      })
+                    }
+                  >
+                    <RotateCcw />
+                    Retry recovery
+                  </button>
+                </div>
+                <p className="intro">
+                  Restore the managed files captured before a configuration
+                  switch.
+                </p>
+                {backups.length ? (
+                  <div className="recovery-list">
+                    {backups.map((p) => (
+                      <article key={p.id}>
+                        <span className="profile-icon">
+                          <History />
+                        </span>
+                        <div>
+                          <small>
+                            {games.find((g) => g.id === p.game)?.name ||
+                              p.gameName}
+                          </small>
+                          <h3>{p.name}</h3>
+                          <small>
+                            {date(p.created)} · {p.count} files
+                          </small>
+                        </div>
+                        <button
+                          onClick={() => setDialog({ type: "restore", p })}
+                        >
+                          <RotateCcw />
+                          Restore
+                        </button>
+                        <button
+                          className="icon danger"
+                          aria-label={"Delete " + p.name}
+                          onClick={() => setDialog({ type: "delete", p })}
+                        >
+                          <Trash2 />
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty">
+                    <div className="empty-art">
+                      <History />
+                    </div>
+                    <h2>No recovery points yet</h2>
+                    <p>
+                      Your first configuration switch creates one automatically.
+                    </p>
+                  </div>
+                )}
+              </>
+            ) : page === "Settings" ? (
+              <>
+                <div className="page-head">
+                  <div>
+                    <h1>Settings</h1>
+                  </div>
+                </div>
+                <section className="settings">
+                  <label>
+                    <span>
+                      <b>Cover size</b>
+                      <small>Artwork size in the library grid</small>
+                    </span>
+                    <select
+                      value={size}
+                      onChange={(e) => {
+                        setSize(e.target.value);
+                        localStorage.setItem("covers", e.target.value);
+                      }}
+                    >
+                      {["small", "medium", "large"].map((v) => (
+                        <option key={v}>{v}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>
+                      <b>Appearance</b>
+                      <small>Color scheme for this workspace</small>
+                    </span>
+                    <select
+                      value={theme}
+                      onChange={(e) => setTheme(e.target.value)}
+                    >
+                      {Object.entries(presets).map(([id, t]) => (
+                        <option key={id} value={id}>
+                          {t.name}
+                        </option>
+                      ))}
+                      {custom && <option value="custom">{custom.name}</option>}
+                    </select>
+                  </label>
+                  <label>
+                    <span>
+                      <b>Recovery points per game</b>
+                      <small>
+                        Older points are pruned after the next successful
+                        switch.
+                      </small>
+                    </span>
+                    <select
+                      value={retention}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        void run(async () =>
+                          setRetention(await call("retention", { value: v })),
+                        );
+                      }}
+                    >
+                      {[5, 10, 20, 50, 100].map((v) => (
+                        <option key={v}>{v}</option>
+                      ))}
+                    </select>
+                  </label>
+                </section>
+                {!!removedGames.length && (
+                  <details className="theme-import">
+                    <summary>Removed games</summary>
+                    {removedGames.map((g) => (
+                      <div className="spread" key={g.id}>
+                        <span>{g.name}</span>
+                        <button
+                          onClick={() =>
+                            void run(async () => {
+                              await call("flag", {
+                                game: g.id,
+                                flag: "restore",
+                              });
+                              setRemovedGames(
+                                removedGames.filter((x) => x.id !== g.id),
+                              );
+                              await refreshGames();
+                            })
+                          }
+                        >
+                          Restore to library
+                        </button>
+                      </div>
+                    ))}
+                  </details>
+                )}
+                <details className="theme-import">
+                  <summary>Custom JSON theme</summary>
+                  <p>
+                    Paste a theme or open a JSON file. Start with the current
+                    preset and edit its colors.
+                  </p>
+                  <button
+                    onClick={() =>
+                      setThemeJson(
+                        JSON.stringify(
+                          presets[theme] || custom || presets.dark,
+                          null,
+                          2,
+                        ),
+                      )
+                    }
+                  >
+                    Load current theme JSON
+                  </button>
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    aria-label="Import theme JSON"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f)
+                        void run(async () => {
+                          if (f.size > 16384)
+                            throw Error("Theme file exceeds 16 KiB.");
+                          setThemeJson(await f.text());
+                        });
+                    }}
+                  />
+                  <textarea
+                    aria-label="Theme JSON"
+                    rows={9}
+                    value={themeJson}
+                    onChange={(e) => setThemeJson(e.target.value)}
+                  />
+                  <button
+                    onClick={() =>
+                      void run(async () => {
+                        const t = parseTheme(themeJson);
+                        localStorage.setItem("customTheme", JSON.stringify(t));
+                        setCustom(t);
+                        setTheme("custom");
+                      })
+                    }
+                  >
+                    Apply custom theme
+                  </button>
+                </details>
                 <button
                   onClick={() =>
                     void run(async () => {
-                      const r = await call<string[]>("recover");
-                      setReport(r);
-                      await reload();
-                      if (!r.length) setToast("No interrupted switches found.");
+                      await call("prismFolder");
+                      await refreshGames();
+                      setToast("Prism instances added.");
                     })
                   }
                 >
-                  <RotateCcw />
-                  Retry recovery
+                  Add Prism Launcher data folder…
                 </button>
-              </div>
-              <p className="intro">
-                Restore the managed files captured before a configuration
-                switch.
-              </p>
-              {backups.length ? (
-                <div className="recovery-list">
-                  {backups.map((p) => (
-                    <article key={p.id}>
-                      <span className="profile-icon">
-                        <History />
-                      </span>
-                      <div>
-                        <small>
-                          {games.find((g) => g.id === p.game)?.name}
-                        </small>
-                        <h3>{p.name}</h3>
-                        <small>
-                          {date(p.created)} · {p.count} files
-                        </small>
-                      </div>
-                      <button onClick={() => setDialog({ type: "restore", p })}>
-                        <RotateCcw />
-                        Restore
-                      </button>
-                      <button
-                        className="icon danger"
-                        aria-label={"Delete " + p.name}
-                        onClick={() => setDialog({ type: "delete", p })}
-                      >
-                        <Trash2 />
-                      </button>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <div className="empty">
-                  <div className="empty-art">
-                    <History />
-                  </div>
-                  <h2>No recovery points yet</h2>
+                <div className="note">
+                  <Database />
                   <p>
-                    Your first configuration switch creates one automatically.
+                    Profiles and recovery points are stored on this PC. Launcher
+                    cloud sync may overwrite a switched profile. If this
+                    happens, temporarily turn off settings sync in the launcher
+                    after checking which copy you want to keep.
                   </p>
                 </div>
-              )}
-            </>
-          ) : page === "Settings" ? (
-            <>
-              <div className="page-head">
-                <div>
-                  <h1>Settings</h1>
-                </div>
-              </div>
-              <section className="settings">
-                <label>
-                  <span>
-                    <b>Cover size</b>
-                    <small>Artwork size in the library grid</small>
-                  </span>
-                  <select
-                    value={size}
-                    onChange={(e) => {
-                      setSize(e.target.value);
-                      localStorage.setItem("covers", e.target.value);
-                    }}
-                  >
-                    {["small", "medium", "large"].map((v) => (
-                      <option key={v}>{v}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  <span>
-                    <b>Appearance</b>
-                    <small>Color scheme for this workspace</small>
-                  </span>
-                  <select
-                    value={theme}
-                    onChange={(e) => setTheme(e.target.value)}
-                  >
-                    {Object.entries(presets).map(([id, t]) => (
-                      <option key={id} value={id}>
-                        {t.name}
-                      </option>
-                    ))}
-                    {custom && <option value="custom">{custom.name}</option>}
-                  </select>
-                </label>
-                <label>
-                  <span>
-                    <b>Recovery points per game</b>
-                    <small>
-                      Older points are pruned after the next successful switch.
-                    </small>
-                  </span>
-                  <select
-                    value={retention}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      void run(async () =>
-                        setRetention(await call("retention", { value: v })),
-                      );
-                    }}
-                  >
-                    {[5, 10, 20, 50, 100].map((v) => (
-                      <option key={v}>{v}</option>
-                    ))}
-                  </select>
-                </label>
-              </section>
-              {!!removedGames.length && (
-                <details className="theme-import">
-                  <summary>Removed games</summary>
-                  {removedGames.map((g) => (
-                    <div className="spread" key={g.id}>
-                      <span>{g.name}</span>
-                      <button
-                        onClick={() =>
-                          void run(async () => {
-                            await call("flag", { game: g.id, flag: "restore" });
-                            setRemovedGames(
-                              removedGames.filter((x) => x.id !== g.id),
-                            );
-                            await refreshGames();
-                          })
-                        }
-                      >
-                        Restore to library
-                      </button>
-                    </div>
-                  ))}
-                </details>
-              )}
-              <details className="theme-import">
-                <summary>Custom JSON theme</summary>
-                <p>
-                  Paste a theme or open a JSON file. Start with the current
-                  preset and edit its colors.
-                </p>
-                <button
-                  onClick={() =>
-                    setThemeJson(
-                      JSON.stringify(
-                        presets[theme] || custom || presets.dark,
-                        null,
-                        2,
-                      ),
-                    )
-                  }
-                >
-                  Load current theme JSON
-                </button>
-                <input
-                  type="file"
-                  accept=".json,application/json"
-                  aria-label="Import theme JSON"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f)
-                      void run(async () => {
-                        if (f.size > 16384)
-                          throw Error("Theme file exceeds 16 KiB.");
-                        setThemeJson(await f.text());
-                      });
-                  }}
-                />
-                <textarea
-                  aria-label="Theme JSON"
-                  rows={9}
-                  value={themeJson}
-                  onChange={(e) => setThemeJson(e.target.value)}
-                />
-                <button
-                  onClick={() =>
-                    void run(async () => {
-                      const t = parseTheme(themeJson);
-                      localStorage.setItem("customTheme", JSON.stringify(t));
-                      setCustom(t);
-                      setTheme("custom");
-                    })
-                  }
-                >
-                  Apply custom theme
-                </button>
-              </details>
+              </>
+            ) : (
+              <Library
+                games={games}
+                scope={page}
+                remove={(game) =>
+                  void run(async () => {
+                    await call("flag", { game: game.id, flag: "removed" });
+                    await refreshGames();
+                    setUndoRemoved({ game, expires: Date.now() + 8000 });
+                  })
+                }
+                query={query}
+                open={(g) => void run(() => enter(g.id))}
+                add={() => setDialog({ type: "setup" })}
+                scan={() =>
+                  void run(async () => {
+                    const n = await call<number>("scan");
+                    await refreshGames();
+                    setToast(
+                      n
+                        ? "Added " + n + " games."
+                        : "Library scan complete. No new games found.",
+                    );
+                  })
+                }
+                run={run}
+                refresh={refreshGames}
+                quick={(g, p) => void run(() => activate(g, p))}
+                busy={busy}
+                size={size}
+              />
+            )}
+          </div>
+        </main>
+        {undoRemoved && (
+          <div className="undo-toast" role="status" key={undoRemoved.expires}>
+            <div>
+              <span>{undoRemoved.game.name} removed</span>
               <button
                 onClick={() =>
                   void run(async () => {
-                    await call("prismFolder");
+                    await call("flag", {
+                      game: undoRemoved.game.id,
+                      flag: "restore",
+                    });
                     await refreshGames();
-                    setToast("Prism instances added.");
+                    setUndoRemoved(null);
                   })
                 }
               >
-                Add Prism Launcher data folder…
+                Undo
               </button>
-              <div className="note">
-                <Database />
-                <p>
-                  Profiles and recovery points are stored on this PC. Launcher
-                  cloud sync may overwrite a switched profile. If this happens,
-                  temporarily turn off settings sync in the launcher after
-                  checking which copy you want to keep.
-                </p>
-              </div>
-            </>
-          ) : (
-            <Library
-              games={games}
-              scope={page}
-              query={query}
-              open={(g) => void run(() => enter(g.id))}
-              add={() => setDialog({ type: "setup" })}
-              scan={() =>
-                void run(async () => {
-                  const n = await call<number>("scan");
-                  await refreshGames();
-                  setToast(
-                    n
-                      ? "Added " + n + " games."
-                      : "Library scan complete. No new games found.",
-                  );
-                })
-              }
-              run={run}
-              refresh={refreshGames}
-              quick={(g, p) => void run(() => activate(g, p))}
-              busy={busy}
-              size={size}
-            />
-          )}
-        </div>
-      </main>
-      {toast && (
-        <div className="toast" role="status">
-          <CheckCircle2 />
-          {toast}
-          <button
-            className="icon"
-            aria-label="Dismiss notification"
-            onClick={() => setToast("")}
-          >
-            <X />
-          </button>
-        </div>
-      )}
-      {dialog?.type === "setup" && (
-        <Setup
-          game={dialog.game}
-          close={() => setDialog(null)}
-          busy={busy}
-          run={run}
-          done={async (id) => {
-            setDialog(null);
-            await refreshGames();
-            await enter(id);
-            setToast("Game configuration is ready.");
-          }}
-        />
-      )}
-      {dialog?.type === "form" && g && (
-        <ProfileForm
-          profile={dialog.p}
-          duplicate={dialog.duplicate}
-          busy={busy}
-          close={() => setDialog(null)}
-          submit={(name, description, tags) =>
-            void run(async () => {
-              const edit = dialog.p && !dialog.duplicate;
-              await call(edit ? "edit" : "create", {
-                game: g.id,
-                profile: dialog.p?.id,
-                source: dialog.duplicate ? dialog.p?.id : null,
-                name,
-                description,
-                tags,
-              });
-              setDialog(null);
-              await reload();
-              setToast(edit ? "Profile updated." : "Configuration created.");
-            })
-          }
-        />
-      )}
-      {dialog?.type === "dirty" && (
-        <Modal
-          title="Unsaved Configuration Changes"
-          busy={busy}
-          close={() => {
-            switchQueue.current = [];
-            setDialog(null);
-          }}
-        >
-          <p>
-            <strong>{dialog.g.name}</strong>
-          </p>
-          <p>
-            Your current game settings have changed since this configuration was
-            last saved. What would you like to do before switching?
-          </p>
-          <details>
-            <summary>View changed files ({dialog.files.length})</summary>
-            <ul className="paths">
-              {dialog.files.map((f) => (
-                <li key={f}>{shortPath(f)}</li>
-              ))}
-            </ul>
-          </details>
-          <p className="hint">
-            SConfig will keep a recovery point before replacing these files.
-          </p>
-          <div className="modal-actions wrap">
-            <button
-              disabled={busy}
-              onClick={() => {
-                switchQueue.current = [];
-                setDialog(null);
-              }}
-            >
-              Cancel
-            </button>
-            <button
-              className="danger"
-              disabled={busy}
-              onClick={() =>
-                void run(() =>
-                  activate(dialog.g, dialog.p, "discard", dialog.token),
-                )
-              }
-            >
-              {dialog.p.id === dialog.g.active
-                ? "Discard & revert"
-                : "Discard Changes & Switch"}
-            </button>
-            {dialog.p.id !== dialog.g.active && (
               <button
-                className="primary"
+                className="icon"
+                aria-label="Dismiss removal"
+                onClick={() => setUndoRemoved(null)}
+              >
+                <X />
+              </button>
+            </div>
+            <div className="undo-countdown" />
+          </div>
+        )}
+        {autoSaveWarning && (
+          <div className="toast auto-save-warning" role="alert">
+            <TriangleAlert />
+            <span>{autoSaveWarning}</span>
+            <button
+              className="icon"
+              onClick={() => setAutoSaveWarning("")}
+              aria-label="Dismiss automatic save warning"
+            >
+              <X />
+            </button>
+          </div>
+        )}
+        {toast && (
+          <div className="toast" role="status">
+            <CheckCircle2 />
+            {toast}
+            <button
+              className="icon"
+              aria-label="Dismiss notification"
+              onClick={() => setToast("")}
+            >
+              <X />
+            </button>
+          </div>
+        )}
+        {dialog?.type === "setup" && (
+          <Setup
+            game={dialog.game}
+            close={() => setDialog(null)}
+            busy={busy}
+            run={run}
+            done={async (id) => {
+              setDialog(null);
+              await refreshGames();
+              await enter(id);
+              setToast("Game configuration is ready.");
+            }}
+          />
+        )}
+        {dialog?.type === "form" && g && (
+          <ProfileForm
+            profile={dialog.p}
+            duplicate={dialog.duplicate}
+            busy={busy}
+            close={() => setDialog(null)}
+            submit={(name, description, tags) =>
+              void run(async () => {
+                const edit = dialog.p && !dialog.duplicate;
+                await call(edit ? "edit" : "create", {
+                  game: g.id,
+                  profile: dialog.p?.id,
+                  source: dialog.duplicate ? dialog.p?.id : null,
+                  name,
+                  description,
+                  tags,
+                });
+                setDialog(null);
+                await reload();
+                setToast(edit ? "Profile updated." : "Configuration created.");
+              })
+            }
+          />
+        )}
+        {dialog?.type === "dirty" && (
+          <Modal
+            title="Unsaved Configuration Changes"
+            busy={busy}
+            close={() => {
+              switchQueue.current = [];
+              setDialog(null);
+            }}
+          >
+            <p>
+              <strong>{dialog.g.name}</strong>
+            </p>
+            <p>
+              Your current game settings have changed since this configuration
+              was last saved. What would you like to do before switching?
+            </p>
+            <details>
+              <summary>View changed files ({dialog.files.length})</summary>
+              <ul className="paths">
+                {dialog.files.map((f) => (
+                  <li key={f}>{shortPath(f)}</li>
+                ))}
+              </ul>
+            </details>
+            <p className="hint">
+              SConfig will keep a recovery point before replacing these files.
+            </p>
+            <div className="modal-actions wrap">
+              <button
+                disabled={busy}
+                onClick={() => {
+                  switchQueue.current = [];
+                  setDialog(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="danger"
                 disabled={busy}
                 onClick={() =>
                   void run(() =>
-                    activate(dialog.g, dialog.p, "save", dialog.token),
+                    activate(dialog.g, dialog.p, "discard", dialog.token),
                   )
                 }
               >
-                Save &amp; Switch
+                {dialog.p.id === dialog.g.active
+                  ? "Discard & revert"
+                  : "Discard Changes & Switch"}
               </button>
-            )}
-          </div>
-        </Modal>
-      )}
-      {(dialog?.type === "delete" || dialog?.type === "restore") && (
-        <Modal
-          busy={busy}
-          title={
-            dialog.type === "delete"
-              ? "Delete " +
-                (dialog.p.recovery ? "recovery point" : "profile") +
-                "?"
-              : "Restore recovery point?"
-          }
-          close={() => setDialog(null)}
-        >
-          <p>
-            {dialog.type === "delete"
-              ? "Permanently delete “" +
-                dialog.p.name +
-                "” from this workspace?"
-              : "Replace the game’s managed files with “" +
-                dialog.p.name +
-                "”? A new recovery point will preserve the current files."}
-          </p>
-          <div className="modal-actions">
-            <button onClick={() => setDialog(null)}>Cancel</button>
-            <button
-              className={dialog.type === "delete" ? "danger" : "primary"}
-              disabled={busy}
-              onClick={() =>
-                void run(async () => {
-                  if (dialog.type === "restore") {
-                    const game = games.find((g) => g.id === dialog.p.game);
-                    if (game) await activate(game, dialog.p);
-                  } else {
-                    await call("delete", {
-                      game: dialog.p.game,
-                      profile: dialog.p.id,
-                    });
-                    setDialog(null);
-                    await reload();
-                    setToast("Deleted successfully.");
+              {dialog.p.id !== dialog.g.active && (
+                <button
+                  className="primary"
+                  disabled={busy}
+                  onClick={() =>
+                    void run(() =>
+                      activate(dialog.g, dialog.p, "save", dialog.token),
+                    )
                   }
-                })
-              }
-            >
+                >
+                  Save &amp; Switch
+                </button>
+              )}
+            </div>
+          </Modal>
+        )}
+        {(dialog?.type === "delete" || dialog?.type === "restore") && (
+          <Modal
+            busy={busy}
+            title={
+              dialog.type === "delete"
+                ? "Delete " +
+                  (dialog.p.recovery ? "recovery point" : "profile") +
+                  "?"
+                : "Restore recovery point?"
+            }
+            close={() => setDialog(null)}
+          >
+            <p>
               {dialog.type === "delete"
-                ? "Delete permanently"
-                : "Restore files"}
-            </button>
-          </div>
-        </Modal>
-      )}
-      {err && (
-        <Modal title="Operation needs attention" close={() => setErr("")}>
-          <div className="error">
-            <TriangleAlert />
-            <p>{err}</p>
-          </div>
-          <div className="modal-actions">
-            <button autoFocus onClick={() => setErr("")}>
-              Close
-            </button>
-          </div>
-        </Modal>
-      )}
-      {busy && (
-        <span className="sr-only" role="status">
-          <LoaderCircle />
-          Processing request
-        </span>
-      )}
-    </div>
+                ? "Permanently delete “" +
+                  dialog.p.name +
+                  "” from this workspace?"
+                : "Replace the game’s managed files with “" +
+                  dialog.p.name +
+                  "”? A new recovery point will preserve the current files."}
+            </p>
+            <div className="modal-actions">
+              <button onClick={() => setDialog(null)}>Cancel</button>
+              <button
+                className={dialog.type === "delete" ? "danger" : "primary"}
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    if (dialog.type === "restore") {
+                      const game =
+                        games.find((g) => g.id === dialog.p.game) ||
+                        (await call<Game>("game", { game: dialog.p.game }));
+                      if (game) await activate(game, dialog.p);
+                    } else {
+                      await call("delete", {
+                        game: dialog.p.game,
+                        profile: dialog.p.id,
+                      });
+                      setDialog(null);
+                      await reload();
+                      setToast("Deleted successfully.");
+                    }
+                  })
+                }
+              >
+                {dialog.type === "delete"
+                  ? "Delete permanently"
+                  : "Restore files"}
+              </button>
+            </div>
+          </Modal>
+        )}
+        {err && (
+          <Modal title="Operation needs attention" close={() => setErr("")}>
+            <div className="error">
+              <TriangleAlert />
+              <p>{err}</p>
+            </div>
+            <div className="modal-actions">
+              <button autoFocus onClick={() => setErr("")}>
+                Close
+              </button>
+            </div>
+          </Modal>
+        )}
+        {busy && (
+          <span className="sr-only" role="status">
+            <LoaderCircle />
+            Processing request
+          </span>
+        )}
+      </div>
+    </>
   );
 }
-createRoot(document.getElementById("root")!).render(<App />);
+class ViewBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    return this.state.failed ? (
+      <div className="view-error" role="alert">
+        <h2>Unable to display this view</h2>
+        <button onClick={() => location.reload()}>Return to library</button>
+      </div>
+    ) : (
+      this.props.children
+    );
+  }
+}
+createRoot(document.getElementById("root")!).render(
+  <ViewBoundary>
+    <App />
+  </ViewBoundary>,
+);

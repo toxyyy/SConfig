@@ -12,11 +12,13 @@ db.execute("CREATE TABLE games(id TEXT PRIMARY KEY,data TEXT NOT NULL,artwork BL
 for label, sensitivity in [("source", "0.7"), ("target-a", "0.1"), ("target-b", "0.2")]:
     instance = root / label
     instance.mkdir()
-    (instance / "options.txt").write_text("mouseSensitivity:" + sensitivity + "\nrenderDistance:12\n")
+    minecraft = instance / "minecraft"
+    minecraft.mkdir()
+    (minecraft / "options.txt").write_text("mouseSensitivity:" + sensitivity + "\nrenderDistance:12\n")
     game = dict(id="prism-fixture-" + label, name="Prism " + label,
                 platform="Prism Launcher", install=str(instance),
                 exe=str(root / "fixture" / "FixtureGame.exe"),
-                maps=[dict(root="\\\\?\\" + str(instance), name="options.txt")],
+                maps=[dict(root="\\\\?\\" + str(minecraft), name="options.txt")],
                 active=None, favorite=False, hidden=False, modified=0, cover=False)
     db.execute("INSERT INTO games(id,data) VALUES(?,?)", (game["id"], json.dumps(game)))
 if "--registered" in sys.argv:
@@ -26,5 +28,15 @@ if "--registered" in sys.argv:
                 maps=[dict(root="\\\\?\\" + str(instance), name="settings.ini")],
                 active=None, favorite=False, hidden=False, modified=0, cover=False)
     db.execute("INSERT INTO games(id,data) VALUES(?,?)", (game["id"], json.dumps(game)))
+rust = root / "rust"
+(rust / "cfg").mkdir(parents=True)
+for name, contents in [("client.cfg", "input.sensitivity \"1\"\n"), ("keys.cfg", "bind one"), ("favorites.cfg", "server one"), ("keys_default.cfg", "default keys")]:
+    (rust / "cfg" / name).write_text(contents)
+(rust / "RustClient.exe").touch()
+game = dict(id="steam-252490", name="Rust multi-file fixture", platform="Steam", install=str(rust),
+            exe=str(root / "fixture" / "FixtureGame.exe"),
+            maps=[dict(root="\\\\?\\" + str(rust / "cfg"), name="client.cfg")], active=None,
+            favorite=False, hidden=False, modified=0, cover=False)
+db.execute("INSERT INTO games(id,data) VALUES(?,?)", (game["id"], json.dumps(game)))
 db.commit()
 db.close()

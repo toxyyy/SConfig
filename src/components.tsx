@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import {
   basename,
+  date,
   call,
   pick,
   shortPath,
@@ -59,14 +60,23 @@ export function Modal({
     </dialog>
   );
 }
-const coverCache = new Map<string, string>();
+const coverCache = new Map<string, { stamp: number; url: string }>();
 export function Cover({ game }: { game: Game }) {
   const ref = useRef<HTMLDivElement>(null);
   const [iconOnly, setIconOnly] = useState(false);
-  const [url, setUrl] = useState(coverCache.get(game.id));
+  const [url, setUrl] = useState(
+    coverCache.get(game.id)?.stamp === game.modified
+      ? coverCache.get(game.id)?.url
+      : undefined,
+  );
   useEffect(() => {
-    setUrl(coverCache.get(game.id));
-    if (coverCache.has(game.id) || !ref.current) return;
+    setUrl(
+      coverCache.get(game.id)?.stamp === game.modified
+        ? coverCache.get(game.id)?.url
+        : undefined,
+    );
+    if (coverCache.get(game.id)?.stamp === game.modified || !ref.current)
+      return;
     let live = true;
     const observer = new IntersectionObserver(
       (entries) => {
@@ -75,7 +85,7 @@ export function Cover({ game }: { game: Game }) {
         call<string | null>("cover", { game: game.id })
           .then((value) => {
             if (value) {
-              coverCache.set(game.id, value);
+              coverCache.set(game.id, { stamp: game.modified, url: value });
               if (live) setUrl(value);
             }
           })
@@ -88,7 +98,7 @@ export function Cover({ game }: { game: Game }) {
       live = false;
       observer.disconnect();
     };
-  }, [game.id, game.cover]);
+  }, [game.id, game.cover, game.modified]);
   const hue = [...game.name].reduce((v, c) => v + c.charCodeAt(0), 0) % 360;
   return (
     <div
@@ -133,7 +143,11 @@ export function Setup({
   const [name, setName] = useState(game?.name || ""),
     [platform, setPlatform] = useState(game?.platform || "Other");
   const [candidates, setCandidates] = useState<
-    { files: string[]; overview: { label: string; value: string }[] }[]
+    {
+      files: string[];
+      overview: { label: string; value: string }[];
+      modified: number;
+    }[]
   >([]);
   const [exe, setExe] = useState(""),
     [files, setFiles] = useState<string[]>([]),
@@ -147,6 +161,7 @@ export function Setup({
       candidates: {
         files: string[];
         overview: { label: string; value: string }[];
+        modified: number;
       }[];
     }>("suggestions", {
       game: game.id,
@@ -199,6 +214,24 @@ export function Setup({
           {candidates.length > 1 && (
             <section className="candidates">
               <h3>Choose your settings</h3>
+              <p className="hint">
+                Account folder IDs do not identify the active account reliably.
+                Change a recognizable setting in the game, close it, then rescan
+                and choose the matching values and newest modification time.
+              </p>
+              <button
+                type="button"
+                onClick={() =>
+                  void run(async () => {
+                    const result = await call<{
+                      candidates: typeof candidates;
+                    }>("suggestions", { game: game?.id });
+                    setCandidates(result.candidates);
+                  })
+                }
+              >
+                Rescan folders
+              </button>
               {candidates.map((c, i) => (
                 <button
                   type="button"
@@ -207,6 +240,10 @@ export function Setup({
                   onClick={() => setFiles(c.files)}
                 >
                   <b>{shortPath(c.files[0])}</b>
+                  <small>
+                    {c.modified ? date(c.modified) : ""}
+                    {i === 0 ? " · Newest file" : ""}
+                  </small>
                   <span>
                     {c.overview
                       .map((v) => v.label + " " + v.value)

@@ -316,6 +316,7 @@ pub fn scan(store: &mut Store) -> Result<usize> {
 pub struct Candidate {
     pub files: Vec<PathBuf>,
     pub overview: Vec<crate::overview::Setting>,
+    pub modified: i64,
 }
 pub fn candidates(g: &Game, roots: &KnownFolders) -> (Option<PathBuf>, Vec<Candidate>) {
     let (mut exe, initial) = suggest(g, roots);
@@ -326,9 +327,19 @@ pub fn candidates(g: &Game, roots: &KnownFolders) -> (Option<PathBuf>, Vec<Candi
     };
     let lower = g.name.to_lowercase();
     if g.id == "steam-252490" || lower == "rust" {
-        let cfg = g.install.join("cfg/client.cfg");
-        if cfg.is_file() {
-            paths.push(vec![cfg]);
+        let files: Vec<_> = [
+            "client.cfg",
+            "keys.cfg",
+            "favorites.cfg",
+            "keys_default.cfg",
+            "autoexec.cfg",
+        ]
+        .iter()
+        .map(|name| g.install.join("cfg").join(name))
+        .filter(|p| p.is_file())
+        .collect();
+        if !files.is_empty() {
+            paths.push(files);
         }
         let path = g.install.join("RustClient.exe");
         if path.is_file() {
@@ -360,9 +371,42 @@ pub fn candidates(g: &Game, roots: &KnownFolders) -> (Option<PathBuf>, Vec<Candi
             }
         }
     }
+    if lower.replace([' ', '-'], "").contains("robrun") {
+        let low = roots
+            .roaming
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("LocalLow"))
+            .or_else(|| {
+                std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData/LocalLow"))
+            });
+        if let Some(low) = low {
+            let base = low.join("Kefir/ROB RUN");
+            let mut files = vec![];
+            for name in ["settings", "player_prefs"] {
+                let folder = base.join(name);
+                if check_path(&folder, false).is_ok() {
+                    if let Ok(items) = fs::read_dir(&folder) {
+                        files.extend(items.flatten().take(128).map(|e| e.path()).filter(|p| {
+                            p.is_file()
+                                && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dat"))
+                        }));
+                    }
+                }
+                let file = base.join(format!("{name}.dat"));
+                if file.is_file() {
+                    files.push(file);
+                }
+            }
+            files.sort();
+            if !files.is_empty() {
+                paths.push(files);
+            }
+        }
+    }
     if g.platform == "Prism Launcher" {
         exe = Some(PathBuf::from("C:/Windows/javaw.exe"));
-        let p = g.install.join(".minecraft/options.txt");
+        let p = minecraft_dir(&g.install).join("options.txt");
         if p.is_file() {
             paths.push(vec![p])
         }
@@ -382,6 +426,23 @@ pub fn candidates(g: &Game, roots: &KnownFolders) -> (Option<PathBuf>, Vec<Candi
         }
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
             parents.push(PathBuf::from(local));
+        }
+        if let Some(low) = roots
+            .roaming
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("LocalLow"))
+        {
+            parents.push(low.clone());
+            if let Ok(vendors) = fs::read_dir(low) {
+                parents.extend(
+                    vendors
+                        .flatten()
+                        .take(128)
+                        .map(|e| e.path())
+                        .filter(|p| p.is_dir() && check_path(p, false).is_ok()),
+                );
+            }
         }
         for parent in parents {
             if let Ok(items) = fs::read_dir(parent) {
@@ -447,7 +508,7 @@ pub fn candidates(g: &Game, roots: &KnownFolders) -> (Option<PathBuf>, Vec<Candi
             }
         }
     }
-    let candidates = paths
+    let mut candidates: Vec<Candidate> = paths
         .into_iter()
         .filter_map(|files| {
             let maps = files
@@ -463,11 +524,52 @@ pub fn candidates(g: &Game, roots: &KnownFolders) -> (Option<PathBuf>, Vec<Candi
                 .ok()?;
             let data = crate::files::capture(&maps).ok()?;
             Some(Candidate {
-                files,
+                files: files.clone(),
                 overview: crate::overview::summarize(&data),
+                modified: files
+                    .iter()
+                    .filter_map(|p| {
+                        fs::metadata(p)
+                            .ok()?
+                            .modified()
+                            .ok()?
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_millis() as i64)
+                    })
+                    .max()
+                    .unwrap_or(0),
             })
         })
         .collect();
+    if exe.is_none() && g.platform != "Prism Launcher" {
+        let choices: Vec<_> = fs::read_dir(&g.install)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_ascii_lowercase();
+                p.is_file()
+                    && name.ends_with(".exe")
+                    && ![
+                        "unins", "crash", "setup", "redist", "launcher", "report", "helper",
+                        "service",
+                    ]
+                    .iter()
+                    .any(|s| name.contains(s))
+            })
+            .take(3)
+            .collect();
+        if choices.len() == 1 {
+            exe = choices.into_iter().next()
+        }
+    }
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.modified));
     (exe, candidates)
 }
 
@@ -486,6 +588,19 @@ pub fn configure(store: &mut Store, g: &mut Game, files: &[PathBuf], exe: PathBu
     store.insert_snapshot(g, &p, &data, true)
 }
 
+pub fn minecraft_dir(instance: &Path) -> PathBuf {
+    let visible = instance.join("minecraft");
+    if visible.is_dir() {
+        visible
+    } else {
+        instance.join(".minecraft")
+    }
+}
+fn prism_setting<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines()
+        .find_map(|l| l.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
+        .map(str::trim)
+}
 pub fn prism(store: &mut Store, data: &Path) -> Result<()> {
     check_path(data, false)?;
     let config = data.join("prismlauncher.cfg");
@@ -494,55 +609,143 @@ pub fn prism(store: &mut Store, data: &Path) -> Result<()> {
         "Choose the Prism data folder containing prismlauncher.cfg."
     );
     let text = String::from_utf8_lossy(&fs::read(config)?).into_owned();
-    let selected = text.lines().find_map(|l| l.strip_prefix("InstanceDir="));
-    let instances = selected
-        .map(|p| {
-            if Path::new(p).is_absolute() {
-                PathBuf::from(p)
-            } else {
-                data.join(p)
-            }
-        })
+    let resolve = |value: &str| {
+        if Path::new(value).is_absolute() {
+            PathBuf::from(value)
+        } else {
+            data.join(value)
+        }
+    };
+    let instances = prism_setting(&text, "InstanceDir")
+        .map(resolve)
         .unwrap_or_else(|| data.join("instances"));
+    let icons = prism_setting(&text, "IconsDir")
+        .map(resolve)
+        .unwrap_or_else(|| data.join("icons"));
     check_path(&instances, false)?;
-    for entry in fs::read_dir(instances)?.flatten().take(256) {
+    let mut container = store
+        .games()?
+        .into_iter()
+        .find(|g| g.id == "prism-launcher")
+        .unwrap_or(Game {
+            id: "prism-launcher".into(),
+            name: "Prism Launcher".into(),
+            platform: "Prism".into(),
+            install: data.into(),
+            exe: None,
+            maps: vec![],
+            active: None,
+            favorite: false,
+            hidden: false,
+            modified: 0,
+            cover: false,
+        });
+    container.install = data.into();
+    let mut executables = vec![data.join("prismlauncher.exe")];
+    for env in ["LOCALAPPDATA", "ProgramFiles"] {
+        if let Some(dir) = std::env::var_os(env) {
+            let root = PathBuf::from(dir);
+            executables.push(root.join("PrismLauncher/prismlauncher.exe"));
+            executables.push(root.join("Programs/PrismLauncher/prismlauncher.exe"));
+        }
+    }
+    let executable = executables.into_iter().find(|p| p.is_file());
+    if container.exe != executable {
+        container.modified = now();
+    }
+    container.exe = executable;
+    Store::put_game(&store.db, &container)?;
+    for entry in fs::read_dir(&instances)?.flatten().take(256) {
         let install = entry.path();
         let cfg = install.join("instance.cfg");
-        let options = install.join(".minecraft/options.txt");
-        if !cfg.is_file() || !options.is_file() || check_path(&cfg, false).is_err() {
+        if !cfg.is_file() || check_path(&cfg, false).is_err() {
             continue;
         }
         let id = format!(
             "prism-{}",
             crate::files::digest(install.to_string_lossy().as_bytes())
         );
-        if store.games()?.iter().any(|g| g.id == id) {
-            continue;
-        }
         let text = String::from_utf8_lossy(&fs::read(cfg)?).into_owned();
-        let name = text
-            .lines()
-            .find_map(|l| l.strip_prefix("name="))
-            .unwrap_or("Minecraft instance");
-        let mut g = Game {
-            id,
-            name: name.into(),
-            platform: "Prism Launcher".into(),
-            install,
-            exe: None,
-            maps: vec![],
-            active: None,
-            favorite: false,
-            hidden: false,
-            modified: now(),
-            cover: false,
-        };
-        Store::put_game(&store.db, &g)?;
-        configure(
-            store,
-            &mut g,
-            &[options],
-            PathBuf::from("C:/Windows/javaw.exe"),
+        let name = prism_setting(&text, "name").unwrap_or("Minecraft instance");
+        let icon = prism_setting(&text, "iconKey").unwrap_or("default");
+        let mc = minecraft_dir(&install);
+        let options = mc.join("options.txt");
+        let mut game = store
+            .games()?
+            .into_iter()
+            .find(|g| g.id == id)
+            .unwrap_or(Game {
+                id,
+                name: name.into(),
+                platform: "Prism Launcher".into(),
+                install: install.clone(),
+                exe: Some(PathBuf::from("C:/Windows/javaw.exe")),
+                maps: vec![],
+                active: None,
+                favorite: false,
+                hidden: false,
+                modified: 0,
+                cover: false,
+            });
+        if game.name != name {
+            game.modified = now();
+        }
+        game.name = title(name)?;
+        if crate::files::safe_name(icon).is_ok() {
+            let image = [
+                icons.join(format!("{icon}.png")),
+                icons.join(format!("{icon}.jpg")),
+                install.join("icon.png"),
+                mc.join("icon.png"),
+            ]
+            .iter()
+            .find_map(|p| artwork(p).ok());
+            if let Some(image) = image {
+                let previous: Option<Vec<u8>> = store
+                    .db
+                    .query_row("SELECT artwork FROM games WHERE id=?", [&game.id], |r| {
+                        r.get(0)
+                    })
+                    .ok()
+                    .flatten();
+                if previous.as_ref() != Some(&image) {
+                    game.modified = now();
+                }
+                game.cover = true;
+                Store::put_game(&store.db, &game)?;
+                store.db.execute(
+                    "UPDATE games SET artwork=? WHERE id=?",
+                    params![image, game.id],
+                )?;
+            }
+        }
+        Store::put_game(&store.db, &game)?;
+        if game.maps.is_empty() && options.is_file() {
+            configure(
+                store,
+                &mut game,
+                &[options],
+                PathBuf::from("C:/Windows/javaw.exe"),
+            )?;
+        }
+        let version = fs::read(install.join("mmc-pack.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| {
+                v.get("components")?
+                    .as_array()?
+                    .iter()
+                    .find(|c| c["uid"] == "net.minecraft")?
+                    .get("version")?
+                    .as_str()
+                    .map(str::to_owned)
+            });
+        store.db.execute(
+            "INSERT OR REPLACE INTO prism_meta VALUES(?,?)",
+            params![
+                game.id,
+                serde_json::json!({"root":data,"version":version,"icon":icon}).to_string()
+            ],
         )?;
     }
     Ok(())

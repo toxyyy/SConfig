@@ -1249,3 +1249,313 @@ nav button[aria-current] {
 .profile-card .tags:empty {
   display: none;
 }
+
+.check-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.profile-thumbnail {
+  width: 76px;
+  height: 76px;
+  max-width: 76px;
+  object-fit: cover;
+  align-self: center;
+  margin: 0 auto 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.profile-card .settings-overview {
+  flex: 1;
+  margin-bottom: 16px;
+}
+.settings-overview details {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.settings-overview details summary {
+  color: var(--blue);
+}
+.settings-overview details .overview {
+  margin: 12px 0 0;
+}
+.settings-overview .overview:empty {
+  display: none;
+}
+.settings-overview .overview {
+  gap: 12px;
+}
+.settings-overview dd {
+  overflow-wrap: anywhere;
+}
+.window-chrome {
+  height: 30px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--side);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+  display: flex;
+  justify-content: flex-end;
+}
+.window-buttons {
+  display: flex;
+}
+.window-buttons button {
+  width: 46px;
+  height: 29px;
+  padding: 0;
+  font-size: 19px;
+  font-weight: 400;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.window-buttons button:hover {
+  background: var(--hover);
+}
+.window-buttons button:last-child:hover {
+  background: #bc303a;
+  color: white;
+}
+.shell {
+  min-height: calc(100vh - 30px);
+}
+.shell > aside {
+  height: calc(100vh - 30px);
+  top: 30px;
+}
+.crumb button {
+  background: transparent;
+  border: 0;
+  padding: 3px;
+  color: var(--blue);
+  font-size: 12px;
+}
+.crumb button:hover {
+  text-decoration: underline;
+}
+.game-card .cover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+  background: radial-gradient(
+    190px circle at var(--spot-x, 50%) var(--spot-y, 50%),
+    #a4caff55,
+    transparent 75%
+  );
+  opacity: 0;
+  transition: opacity 0.25s;
+}
+.game-card:hover .cover::after {
+  opacity: 1;
+}
+.game-card .card-menu,
+.game-card .favorite-button {
+  z-index: 3;
+  opacity: 0;
+  transform: translateY(-6px) scale(0.92);
+  transition:
+    opacity 0.18s,
+    transform 0.18s,
+    background 0.18s;
+}
+.game-card:hover .card-menu,
+.game-card:hover .favorite-button,
+.game-card:focus-within .card-menu,
+.game-card:focus-within .favorite-button,
+.game-card .favorite-button.selected {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+.games-list .game-card {
+  display: grid;
+  grid-template-columns: 60px 34px minmax(120px, 1fr) auto 34px;
+  align-items: center;
+  gap: 12px;
+  padding-right: 14px;
+  min-height: 76px;
+}
+.games-list .game-open,
+.games-list .card-info {
+  display: contents;
+}
+.games-list .cover {
+  grid-column: 1;
+  grid-row: 1;
+}
+.games-list .card-info > small {
+  display: none;
+}
+.games-list .card-info h3 {
+  grid-column: 3;
+  grid-row: 1;
+  margin: 0;
+}
+.games-list .card-info .status {
+  grid-column: 4;
+  grid-row: 1;
+}
+.games-list .favorite-button {
+  grid-column: 2;
+  grid-row: 1;
+  position: static;
+  background: transparent;
+  border: 0;
+}
+.games-list .card-menu {
+  grid-column: 5;
+  grid-row: 1;
+  position: static;
+}
+.games-list .game-card:focus-within {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.hidden-label {
+  margin-left: 8px;
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.undo-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 24px;
+  z-index: 12;
+  min-width: 300px;
+  max-width: min(480px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 12px 40px #0005;
+  overflow: hidden;
+  animation: undo-enter 0.23s ease-out;
+}
+.undo-toast > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+}
+.undo-toast span {
+  flex: 1;
+}
+.undo-toast button {
+  background: transparent;
+  border: 0;
+  color: var(--blue);
+}
+.undo-countdown {
+  height: 3px;
+  background: var(--blue);
+  transform-origin: left;
+  animation: undo-time 8s linear forwards;
+}
+@keyframes undo-enter {
+  from {
+    opacity: 0;
+    transform: translateX(70px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes undo-time {
+  to {
+    transform: scaleX(0);
+  }
+}
+.prism-head {
+  margin: 22px 0;
+}
+.instance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
+  gap: 16px;
+}
+.instance-card {
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.instance-card > small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.instance-art {
+  width: 100%;
+  max-width: 140px;
+  align-self: center;
+}
+.instance-art .cover {
+  aspect-ratio: 1;
+  border-radius: 10px;
+  background: var(--side) !important;
+}
+.instance-art .cover img {
+  object-fit: contain;
+  padding: 8px;
+}
+.instance-art .cover b {
+  font-size: 16px;
+}
+.instance-card .settings-overview {
+  flex: 1;
+}
+.instance-card .overview {
+  margin: 8px 0;
+}
+.source-instance {
+  flex-direction: column;
+  align-items: center;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+.source-grid {
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+}
+.source-grid .instance-art {
+  max-width: 90px;
+}
+.source-grid .overview {
+  grid-template-columns: 1fr 1fr;
+  font-size: 12px;
+}
+dialog:has(.source-grid) {
+  width: min(900px, 94vw);
+}
+.view-error {
+  min-height: 100vh;
+  padding: 15vh 30px;
+  display: grid;
+  align-content: start;
+  justify-content: center;
+  gap: 20px;
+  background: var(--bg);
+  color: var(--ink);
+}
+@media (hover: none) {
+  .game-card .card-menu,
+  .game-card .favorite-button {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.auto-save-warning{bottom:90px;max-width:500px}.auto-save-warning>svg{color:#e9b66d}

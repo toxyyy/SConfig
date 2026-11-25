@@ -16,6 +16,18 @@ const dark = {
   green: "#94d9bd",
 };
 export const presets: Record<string, Theme> = {
+  oled: {
+    name: "OLED black",
+    mode: "dark",
+    colors: {
+      ...dark,
+      bg: "#000000",
+      side: "#090c10",
+      panel: "#141920",
+      hover: "#222a35",
+      border: "#303a48",
+    },
+  },
   dark: { name: "Midnight", mode: "dark", colors: dark },
   light: {
     name: "Daylight",

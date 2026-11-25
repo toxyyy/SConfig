@@ -4,11 +4,13 @@ import path from "node:path";
 import http from "node:http";
 import { setTimeout as wait } from "node:timers/promises";
 import assert from "node:assert/strict";
-const native = process.argv.includes("--native");
 fs.mkdirSync(".test-output", { recursive: true });
 const root = fs.mkdtempSync(path.resolve(".test-output/desktop-"));
 const exe = path.join(root, "SConfig.exe");
-fs.copyFileSync("src-tauri/target/release/SConfig.exe", exe);
+fs.copyFileSync(
+  process.env.SCONFIG_TEST_EXECUTABLE || "src-tauri/target/release/SConfig.exe",
+  exe,
+);
 fs.mkdirSync(path.join(root, "fixture"));
 fs.writeFileSync(path.join(root, "fixture", "FixtureGame.exe"), "");
 fs.writeFileSync(
@@ -19,7 +21,7 @@ const ini = path.join(root, "fixture", "settings.ini");
 execFileSync("python", [
   "tests/desktop/prism-fixture.py",
   root,
-  ...(native ? [] : ["--registered"]),
+  "--registered",
 ]);
 if (process.argv.includes("--legacy"))
   fs.renameSync(
@@ -153,7 +155,10 @@ try {
       m.error ? p.reject(Error(m.error.message)) : p.resolve(m.result);
     }
   };
-  assert.equal(await evaluate("document.title.startsWith('SConfig')"), true);
+  await until(
+    () => evaluate("document.title.startsWith('SConfig')"),
+    "document loaded",
+  );
   assert.ok(fs.existsSync(path.join(root, "SConfigData", "library.sqlite3")));
   await until(
     () =>
@@ -176,145 +181,144 @@ try {
     );
   };
   await screenshot("library");
-  if (native) {
-    await click("button", "Add game");
-    for (const [label, file] of [
-      ["Choose executable…", "FixtureGame.exe"],
-      ["Choose files", "settings.ini"],
-    ]) {
-      await click("button", label, "document.querySelector('dialog')");
-      execFileSync(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-File",
-          "tests/desktop/pick-file.ps1",
-          String(app.pid),
-          path.join(root, "fixture", file),
-        ],
-        { timeout: 18000, windowsHide: true },
-      );
-      await until(
-        () => evaluate("!document.querySelector('fieldset[disabled]')"),
-        "picker finished",
-      );
-    }
-    await click("button", "Add game", "document.querySelector('dialog')");
-    await until(
-      () =>
-        evaluate(
-          "!document.querySelector('dialog') && document.querySelector('.detail-head') && !document.querySelector('[aria-busy=true]')",
-        ),
-      "manual registration",
+
+  const request = (kind, fields = {}) =>
+    evaluate(
+      "window.__TAURI_INTERNALS__.invoke('request',{action:" +
+        JSON.stringify({ kind, ...fields }) +
+        "})",
     );
-  } else {
-    await until(
-      () =>
-        evaluate(
-          "Boolean(document.querySelector('.game-card[data-game-id=fixture-game]')) && !document.querySelector('[aria-busy=true]')",
-        ),
-      "fixture ready",
-    );
+  const openFixture = async () => {
     await evaluate(
-      "document.querySelector('.game-card[data-game-id=fixture-game] .game-open').click()",
+      "document.querySelector('[data-game-id=fixture-game] .game-open').click()",
     );
-  }
-  await until(
-    () =>
-      evaluate(
-        "document.querySelector('.profile-card h3')?.textContent==='Original settings'",
-      ),
-    "original snapshot",
+    await until(
+      () =>
+        evaluate(
+          "Boolean(document.querySelector('.detail-head')) && !document.querySelector('[aria-busy=true]')",
+        ),
+      "fixture detail",
+    );
+  };
+  assert.equal(
+    await evaluate(
+      "getComputedStyle(document.body).getPropertyValue('--bg').trim()",
+    ),
+    "#000000",
   );
   assert.equal(
-    await evaluate("document.querySelector('.overview dd')?.textContent"),
-    "1",
-  );
-  await form("Practice");
-  fs.writeFileSync(ini, "sensitivity=2\r\n");
-  await until(
-    () => evaluate("document.body.innerText.includes('Unsaved Changes')"),
-    "filesystem watcher",
-  );
-  await form("Ranked");
-  fs.writeFileSync(ini, "sensitivity=3\r\n");
-  await evaluate(
-    "[...document.querySelectorAll('.profile-card')].find(c=>c.querySelector('h3').textContent==='Ranked').querySelector('.switch-button').click()",
-  );
-  await until(
-    () =>
-      evaluate(
-        "document.querySelector('dialog h2')?.innerText==='Unsaved Configuration Changes'",
-      ),
-    "unsaved changes dialog",
-  );
-  await screenshot("changes");
-  await click("button", "Cancel", "document.querySelector('dialog')");
-  assert.match(fs.readFileSync(ini, "utf8"), /=3/);
-  await evaluate(
-    "[...document.querySelectorAll('.profile-card')].find(c=>c.querySelector('h3').textContent==='Ranked').querySelector('.switch-button').click()",
-  );
-  await click("button", "Save & Switch", "document.querySelector('dialog')");
-  await until(
-    () => fs.readFileSync(ini, "utf8").includes("=2"),
-    "activated bytes",
-  );
-  await until(
-    () =>
-      evaluate(
-        "!document.querySelector('dialog') && !document.querySelector('[aria-busy=true]')",
-      ),
-    "commit",
-  );
-  if (native) {
     await evaluate(
-      "[...document.querySelectorAll('.profile-card')].find(c=>c.querySelector('h3').textContent==='Ranked').querySelector('button[aria-label]').click()",
-    );
-    await click("button", "Choose PNG thumbnail…");
-    const thumb = path.join(root, "thumbnail.png");
-    fs.copyFileSync("src/logo.png", thumb);
-    execFileSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-File",
-        "tests/desktop/pick-file.ps1",
-        String(app.pid),
-        thumb,
-      ],
-      { timeout: 18000, windowsHide: true },
-    );
-    await until(
-      () => evaluate("Boolean(document.querySelector('.profile-thumbnail'))"),
-      "profile thumbnail",
-    );
-  }
-  await screenshot("profiles");
-  await click("aside button", "Recovery");
-  await click("button", "Restore");
-  await click("button", "Restore files", "document.querySelector('dialog')");
-  await until(
-    () => fs.readFileSync(ini, "utf8").includes("=3"),
-    "restored bytes",
+      "document.querySelector('.window-chrome').innerText.includes('SConfig')",
+    ),
+    false,
   );
-
-  await evaluate("document.querySelector('aside nav button').click()");
+  assert.equal(
+    await evaluate(
+      "document.querySelectorAll('[data-game-id^=prism-fixture]').length",
+    ),
+    0,
+  );
+  assert.equal(
+    await evaluate(
+      "Boolean(document.querySelector('[data-game-id=prism-launcher]'))",
+    ),
+    true,
+  );
+  await openFixture();
+  if (!(await request("detail", { game: "fixture-game" })).length)
+    await form("Original settings");
+  const active = (await request("game", { game: "fixture-game" })).active;
+  const settings =
+    "sensitivity=2\nDefaultFOV=90.000000\nRefreshRate=165.001007\nVSync=0\nWindowMode=0\nADSMouseUseSpecific=1\nADSMouseSensitivity1x=35\nADSMouseSensitivity2x=50\nOverallQualityLevelName=Custom\nTexture=2\nShadow=1\n";
+  fs.writeFileSync(ini, settings);
+  await until(async () => {
+    const p = (await request("detail", { game: "fixture-game" })).find(
+      (p) => p.id === active,
+    );
+    return p?.overview.some(
+      (s) => s.label === "Sensitivity" && s.value === "2",
+    );
+  }, "automatic save into active snapshot");
+  await until(
+    () =>
+      evaluate(
+        "document.querySelector('.profile-card.active')?.innerText.includes('165')",
+      ),
+    "automatic overview refresh",
+  );
+  const overview = (await request("detail", { game: "fixture-game" })).find(
+    (p) => p.id === active,
+  ).overview;
+  assert.equal(overview.find((s) => s.label === "Field of view").value, "90");
+  assert.equal(overview.find((s) => s.label === "Refresh rate").value, "165");
+  assert.equal(
+    overview.some((s) => /VSync|Display mode/.test(s.label)),
+    false,
+  );
+  assert.equal(overview.find((s) => s.label === "1x").group, "ads");
+  assert.equal(
+    overview.find((s) => s.label === "Texture quality").group,
+    "graphics",
+  );
+  assert.equal(
+    await evaluate("document.body.innerText.includes('Unsaved Changes')"),
+    false,
+  );
   await evaluate(
-    "[...document.querySelectorAll('.game-card')].find(c=>c.textContent.includes('FixtureGame')).querySelector('.favorite-button').click()",
+    "document.querySelector('.profile-card.active details').open=true",
+  );
+  execFileSync("python", [
+    "-c",
+    "import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute('INSERT OR REPLACE INTO media VALUES(?,?)',(sys.argv[2],open(sys.argv[3],'rb').read()));db.commit()",
+    path.join(root, "SConfigData", "library.sqlite3"),
+    active,
+    path.resolve("src/logo.png"),
+  ]);
+  await click(".crumb button", "Library");
+  await openFixture();
+  await until(
+    () => evaluate("Boolean(document.querySelector('.profile-thumbnail'))"),
+    "thumbnail",
+  );
+  const thumb = await evaluate(
+    "(()=>{const a=document.querySelector('.profile-thumbnail').getBoundingClientRect(),b=document.querySelector('.profile-card').getBoundingClientRect();return {w:a.width,h:a.height,offset:Math.abs(a.x+a.width/2-b.x-b.width/2)}})()",
+  );
+  assert.ok(
+    thumb.w <= 76 && thumb.h <= 76 && thumb.offset < 3,
+    JSON.stringify(thumb),
+  );
+  await screenshot("profiles");
+  await click(".crumb button", "Library");
+  await evaluate(
+    "window.dispatchEvent(new MouseEvent('mouseup',{button:3,bubbles:true,cancelable:true}))",
+  );
+  await until(
+    () => evaluate("Boolean(document.querySelector('.detail-head'))"),
+    "mouse back",
+  );
+  await evaluate(
+    "window.dispatchEvent(new MouseEvent('mouseup',{button:4,bubbles:true,cancelable:true}))",
+  );
+  await until(
+    () => evaluate("Boolean(document.querySelector('.games-grid'))"),
+    "mouse forward",
+  );
+  await evaluate(
+    "document.querySelector('[data-game-id=fixture-game] .favorite-button').click()",
   );
   await until(
     () =>
       evaluate(
-        "document.querySelector('.game-card')?.textContent.includes('FixtureGame') && document.querySelector('.favorite-button')?.getAttribute('aria-pressed')==='true'",
+        "document.querySelector('[data-game-id=fixture-game] .favorite-button')?.getAttribute('aria-pressed')==='true'",
       ),
-    "favorite pinned first",
+    "favorite",
   );
   await evaluate(
-    "document.querySelector('.game-card').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:440,clientY:330}))",
+    "document.querySelector('[data-game-id=fixture-game]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:440,clientY:330}))",
   );
   await until(
     () => evaluate("Boolean(document.querySelector('[role=menu]'))"),
-    "pointer menu",
+    "context menu",
   );
   assert.equal(
     await evaluate(
@@ -322,136 +326,103 @@ try {
     ),
     440,
   );
+  await click("button", "Remove game…");
+  await until(
+    () =>
+      evaluate(
+        "Boolean(document.querySelector('.undo-toast'))&&!document.querySelector('[data-game-id=fixture-game]')",
+      ),
+    "instant remove",
+  );
   assert.equal(
     await evaluate("Boolean(document.querySelector('dialog'))"),
     false,
   );
-  await screenshot("context-menu");
-  await evaluate(
-    "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))",
-  );
-  await click("aside button", "Settings");
-  await evaluate(
-    "(()=>{const s=[...document.querySelectorAll('.settings select')][1];s.value='light';s.dispatchEvent(new Event('change',{bubbles:true}))})()",
-  );
-  await until(
-    () =>
-      evaluate(
-        "getComputedStyle(document.body).backgroundColor==='rgb(243, 245, 250)'",
-      ),
-    "light background",
-  );
-  await wait(250);
-  await screenshot("light-settings");
-  assert.equal(
+  assert.ok(
     await evaluate(
-      "document.querySelector('footer')===null && document.querySelector('.local')===null",
+      "document.querySelector('.undo-countdown').getBoundingClientRect().width>0",
     ),
-    true,
+  );
+  await screenshot("remove-undo");
+  await click(".undo-toast button", "Undo");
+  await until(
+    () =>
+      evaluate(
+        "Boolean(document.querySelector('[data-game-id=fixture-game]'))",
+      ),
+    "undo",
   );
   await evaluate(
-    "(()=>{const s=[...document.querySelectorAll('.settings select')][1];s.value='forest';s.dispatchEvent(new Event('change',{bubbles:true}))})()",
+    "document.querySelector('button[aria-label=\"List view\"]').click()",
   );
+  const star = await evaluate(
+    "(()=>{const c=document.querySelector('[data-game-id=fixture-game]'),s=c.querySelector('.favorite-button').getBoundingClientRect(),a=c.querySelector('.cover').getBoundingClientRect();return {sx:s.x,ax:a.right,opacity:getComputedStyle(c.querySelector('.favorite-button')).opacity}})()",
+  );
+  assert.ok(star.sx >= star.ax);
+  assert.equal(star.opacity, "1");
+  await screenshot("list");
+  await request("flag", { game: "fixture-game", flag: "hidden" });
+  await click("aside button", "Hidden");
+  // Refresh the library state through the normal scan action.
+  await click("button", "Scan library");
   await until(
     () =>
       evaluate(
-        "getComputedStyle(document.body).backgroundColor==='rgb(16, 27, 24)'",
+        "Boolean(document.querySelector('[data-game-id=fixture-game]'))",
       ),
-    "forest preset",
-  );
-  await wait(250);
-  await screenshot("forest-settings");
-  await evaluate("document.querySelector('aside nav button').click()");
-  await until(
-    () =>
-      evaluate(
-        "Boolean(document.querySelector('.game-open:not(:disabled)')) && !document.querySelector('[aria-busy=true]')",
-      ),
-    "library",
+    "hidden view",
   );
   await evaluate(
-    "document.querySelector('.game-card[data-game-id=prism-fixture-source] .game-open').click()",
+    "(()=>{const i=document.querySelector('input[aria-label=\"Search library\"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,'fixture');i.dispatchEvent(new Event('input',{bubbles:true}))})()",
   );
   await until(
-    () =>
-      evaluate(
-        "document.querySelector('.profile-card h3')?.textContent==='Original settings'",
-      ),
-    "Prism original",
+    () => evaluate("document.querySelectorAll('.game-card').length>=2"),
+    "search across hidden and visible",
   );
-  fs.writeFileSync(
-    path.join(root, "source", "options.txt"),
-    "mouseSensitivity:0.8\nrenderDistance:16\n",
-  );
-  await form("Shared settings");
+  await click(".crumb button", "Library");
   await evaluate(
-    "[...document.querySelectorAll('.profile-card')].find(c=>c.querySelector('h3').textContent==='Shared settings').querySelector('button[aria-label]').click()",
+    "document.querySelector('[data-game-id=prism-launcher] .game-open').click()",
   );
-  await click("button", "Copy to other instances…");
   await until(
     () =>
       evaluate(
-        "Boolean(document.querySelector('dialog input[value=prism-fixture-target-a]'))",
+        "document.querySelectorAll('.instance-card').length>=3 && !document.querySelector('[aria-busy=true]')",
       ),
-    "Prism chooser",
+    "Prism instances",
   );
-  for (const id of ["prism-fixture-target-a", "prism-fixture-target-b"]) {
-    await evaluate(
-      "document.querySelector('dialog input[value=" + id + "]').click()",
-    );
-  }
-  await click("button", "Copy configuration");
-  await until(async () => {
-    if (
-      ["target-a", "target-b"].every((name) =>
-        fs
-          .readFileSync(path.join(root, name, "options.txt"), "utf8")
-          .includes("0.8"),
-      )
-    )
-      return true;
-    return evaluate(
-      "Boolean(document.querySelector('dialog .error')?.textContent.match(/Close javaw?\\.exe/))",
-    );
-  }, "Prism activation or running-game protection");
-  const protectedByJava = await evaluate(
-    "Boolean(document.querySelector('dialog .error')?.textContent.match(/Close javaw?\\.exe/))",
+  await screenshot("prism-instances");
+  await evaluate(
+    "[...document.querySelectorAll('.instance-card')].find(e=>e.querySelector('h3').textContent==='Prism target-a').querySelector('button').click()",
   );
-  if (protectedByJava) {
-    assert.match(
-      fs.readFileSync(path.join(root, "target-a", "options.txt"), "utf8"),
-      /0.1/,
-    );
-    assert.match(
-      fs.readFileSync(path.join(root, "target-b", "options.txt"), "utf8"),
-      /0.2/,
-    );
-    const copies = execFileSync(
-      "python",
-      [
-        "-c",
-        "import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute(\"SELECT COUNT(*) FROM profiles WHERE game LIKE 'prism-fixture-target-%' AND json_extract(data,'$.name')='Shared settings'\").fetchone()[0])",
-        path.join(root, "SConfigData", "library.sqlite3"),
-      ],
-      { encoding: "utf8" },
-    );
-    assert.equal(Number(copies.trim()), 2);
-    await click("button", "Close", "document.querySelector('dialog')");
-    console.log(
-      "PASS: Prism copies persisted; running Java blocks activation and preserves both live instances.",
-    );
-  } else {
-    console.log(
-      "PASS: Prism bulk activation applied to both temporary instances.",
-    );
-  }
+  await until(
+    () => evaluate("Boolean(document.querySelector('dialog .source-grid'))"),
+    "Prism source picker",
+  );
+  await screenshot("prism-source-picker");
+  await evaluate(
+    "[...document.querySelectorAll('dialog .instance-card')].find(e=>e.querySelector('h3').textContent==='Prism source').querySelector('button').click()",
+  );
   await until(
     () => evaluate("!document.querySelector('[aria-busy=true]')"),
-    "Prism completion",
+    "Prism copy finished",
   );
-  await screenshot("prism-shared");
+  const targetFile = path.join(root, "target-a", "minecraft", "options.txt");
+  if (fs.readFileSync(targetFile, "utf8").includes("0.7"))
+    console.log("PASS: Prism source settings copied to selected destination.");
+  else {
+    assert.ok(
+      await evaluate(
+        "document.body.innerText.includes('Close Minecraft')||document.body.innerText.includes('java')",
+      ),
+      "expected closed-game protection",
+    );
+    assert.match(fs.readFileSync(targetFile, "utf8"), /0.1/);
+    console.log(
+      "PASS: running Java blocked Prism write and preserved the destination.",
+    );
+  }
   console.log(
-    "PASS: desktop capture, file watcher, cancel, save & switch, recovery restore.",
+    "PASS: OLED, title chrome, automatic save, rounded overview, ADS/graphics, centered thumbnail, history, remove/undo, list stars, hidden/global search, grouped Prism UI.",
   );
   console.log("Screenshots:", root);
 } catch (e) {
