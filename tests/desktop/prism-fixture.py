@@ -5,7 +5,7 @@ import sqlite3
 import sys
 
 root = Path(sys.argv[1]).resolve()
-workspace = root / "SwitchboardData"
+workspace = root / "SConfigData"
 workspace.mkdir()
 db = sqlite3.connect(workspace / "library.sqlite3")
 db.execute("CREATE TABLE games(id TEXT PRIMARY KEY,data TEXT NOT NULL,artwork BLOB)")

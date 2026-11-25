@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 const native = process.argv.includes("--native");
 fs.mkdirSync(".test-output", { recursive: true });
 const root = fs.mkdtempSync(path.resolve(".test-output/desktop-"));
-const exe = path.join(root, "Switchboard.exe");
-fs.copyFileSync("src-tauri/target/release/switchboard.exe", exe);
+const exe = path.join(root, "SConfig.exe");
+fs.copyFileSync("src-tauri/target/release/SConfig.exe", exe);
 fs.mkdirSync(path.join(root, "fixture"));
 fs.writeFileSync(path.join(root, "fixture", "FixtureGame.exe"), "");
 fs.writeFileSync(
@@ -21,6 +21,11 @@ execFileSync("python", [
   root,
   ...(native ? [] : ["--registered"]),
 ]);
+if (process.argv.includes("--legacy"))
+  fs.renameSync(
+    path.join(root, "SConfigData"),
+    path.join(root, "SwitchboardData"),
+  );
 const port = await new Promise((r) => {
   const s = http.createServer();
   s.listen(0, "127.0.0.1", () => {
@@ -38,7 +43,11 @@ const app = spawn(exe, ["--portable"], {
       port +
       " --remote-debugging-address=127.0.0.1",
   },
-  stdio: "ignore",
+  stdio: ["ignore", "ignore", "pipe"],
+});
+let appErrors = "";
+app.stderr.on("data", (chunk) => {
+  appErrors = (appErrors + chunk.toString()).slice(-4000);
 });
 let ws,
   n = 0,
@@ -46,6 +55,8 @@ let ws,
 async function until(fn, desc) {
   let last;
   for (let i = 0; i < 200; i++) {
+    if (app.exitCode !== null)
+      throw new Error("SConfig exited with " + app.exitCode + ": " + appErrors);
     try {
       if (await fn()) return;
     } catch (e) {
@@ -142,6 +153,8 @@ try {
       m.error ? p.reject(Error(m.error.message)) : p.resolve(m.result);
     }
   };
+  assert.equal(await evaluate("document.title.startsWith('SConfig')"), true);
+  assert.ok(fs.existsSync(path.join(root, "SConfigData", "library.sqlite3")));
   await until(
     () =>
       evaluate(
@@ -418,7 +431,7 @@ try {
       [
         "-c",
         "import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute(\"SELECT COUNT(*) FROM profiles WHERE game LIKE 'prism-fixture-target-%' AND json_extract(data,'$.name')='Shared settings'\").fetchone()[0])",
-        path.join(root, "SwitchboardData", "library.sqlite3"),
+        path.join(root, "SConfigData", "library.sqlite3"),
       ],
       { encoding: "utf8" },
     );

@@ -270,7 +270,7 @@ function App() {
           <span>
             <img src={logo} alt="" />
           </span>
-          Switchboard
+          SConfig
         </div>
         <nav aria-label="Collection">
           <h4>Workspace</h4>
@@ -683,7 +683,7 @@ function App() {
             </ul>
           </details>
           <p className="hint">
-            Switchboard will keep a recovery point before replacing these files.
+            SConfig will keep a recovery point before replacing these files.
           </p>
           <div className="modal-actions wrap">
             <button

@@ -260,7 +260,7 @@ export function Setup({
             </button>
           </label>
           <p className="hint">
-            Choose the process that runs while you play. Switchboard checks it
+            Choose the process that runs while you play. SConfig checks it
             before replacing settings.
           </p>
           <label>Managed configuration files</label>

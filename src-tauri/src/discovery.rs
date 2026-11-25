@@ -554,8 +554,8 @@ pub fn executable_artwork(exe: &Path) -> Option<Vec<u8>> {
     check_path(exe, false).ok()?;
     let root = std::env::var_os("SystemRoot")?;
     let output=std::process::Command::new(PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe"))
- .args(["-NoProfile","-NonInteractive","-Command","Add-Type -AssemblyName System.Drawing; $icon=[System.Drawing.Icon]::ExtractAssociatedIcon($env:SWITCHBOARD_ICON_EXE); if($icon){$b=$icon.ToBitmap();$m=New-Object IO.MemoryStream;$b.Save($m,[System.Drawing.Imaging.ImageFormat]::Png);[Convert]::ToBase64String($m.ToArray());$b.Dispose();$icon.Dispose();$m.Dispose()}"])
- .env("SWITCHBOARD_ICON_EXE",exe).creation_flags(0x08000000).output().ok()?;
+ .args(["-NoProfile","-NonInteractive","-Command","Add-Type -AssemblyName System.Drawing; $icon=[System.Drawing.Icon]::ExtractAssociatedIcon($env:SCONFIG_ICON_EXE); if($icon){$b=$icon.ToBitmap();$m=New-Object IO.MemoryStream;$b.Save($m,[System.Drawing.Imaging.ImageFormat]::Png);[Convert]::ToBase64String($m.ToArray());$b.Dispose();$icon.Dispose();$m.Dispose()}"])
+ .env("SCONFIG_ICON_EXE",exe).creation_flags(0x08000000).output().ok()?;
     use base64::Engine;
     if !output.status.success() {
         return None;

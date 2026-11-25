@@ -3432,6 +3432,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "sconfig"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "notify",
+ "quick-xml 0.42.0",
+ "rfd",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "steamlocate",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-single-instance",
+ "tempfile",
+ "uuid",
+ "windows-sys 0.61.2",
+ "winreg",
+ "zip",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3880,30 +3904,6 @@ dependencies = [
  "base64 0.21.7",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "switchboard"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "notify",
- "quick-xml 0.42.0",
- "rfd",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "steamlocate",
- "tauri",
- "tauri-build",
- "tauri-plugin-single-instance",
- "tempfile",
- "uuid",
- "windows-sys 0.61.2",
- "winreg",
- "zip",
 ]
 
 [[package]]

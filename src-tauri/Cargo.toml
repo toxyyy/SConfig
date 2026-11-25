@@ -1,5 +1,5 @@
 [package]
-name = "switchboard"
+name = "sconfig"
 version = "0.2.0"
 edition = "2021"
 description = "Offline game configuration manager"
@@ -10,7 +10,7 @@ desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-single-instance", "
 custom-protocol = ["desktop", "tauri/custom-protocol"]
 
 [[bin]]
-name = "switchboard"
+name = "sconfig"
 path = "src/main.rs"
 required-features = ["desktop"]
 
@@ -24,7 +24,7 @@ anyhow = "1"
 base64 = "0.22"
 notify = {version="8",optional=true}
 rfd = {version="0.15",optional=true}
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.34", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

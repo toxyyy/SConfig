@@ -191,7 +191,7 @@ fn choose(
         "archive" => (
             &mut s.grants.archive,
             dialog
-                .add_filter("Switchboard profile", &["zip"])
+                .add_filter("SConfig profile", &["zip"])
                 .pick_file()
                 .into_iter()
                 .collect(),
@@ -488,9 +488,7 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
             let mut profiles = vec![];
             for p in store.profiles(Some(&game), false)? {
                 let mut v = serde_json::to_value(&p)?;
-                v["overview"] = json!(switchboard::overview::summarize(
-                    &store.load(&p, g.maps.len())?
-                ));
+                v["overview"] = json!(sconfig::overview::summarize(&store.load(&p, g.maps.len())?));
                 let image: Option<Vec<u8>> = store
                     .db
                     .query_row("SELECT bytes FROM media WHERE id=?", [&p.id], |r| r.get(0))
@@ -858,7 +856,7 @@ fn execute(s: &mut Session, app: &AppHandle, action: Action) -> Result<Value> {
                 .iter()
                 .enumerate()
                 .map(|(i, m)| {
-                    switchboard::comparison::compare(&m.name, a[i].as_deref(), b[i].as_deref())
+                    sconfig::comparison::compare(&m.name, a[i].as_deref(), b[i].as_deref())
                 })
                 .collect();
             Ok(json!(result))
@@ -927,7 +925,7 @@ pub async fn request(app: AppHandle, action: Action) -> Result<Value, String> {
         let state = app.state::<Mutex<Session>>();
         let mut s = state
             .lock()
-            .map_err(|_| "The library is busy after a failure. Restart Switchboard.".to_string())?;
+            .map_err(|_| "The library is busy after a failure. Restart SConfig.".to_string())?;
         let kind = std::mem::discriminant(&action);
         let result = execute(&mut s, &app, action);
         if result.is_err() {

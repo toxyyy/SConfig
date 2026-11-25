@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Switchboard",
+  "productName": "SConfig",
   "version": "0.2.0",
-  "identifier": "local.switchboard.configmanager",
+  "identifier": "local.sconfig.configmanager",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:1420",
@@ -12,7 +12,8 @@
   "app": {
     "windows": [
       {
-        "title": "Switchboard",
+        "title": "SConfig",
+        "create": false,
         "width": 1180,
         "height": 790,
         "minWidth": 780,
@@ -31,5 +32,6 @@
     "icon": [
       "icons/icon.ico"
     ]
-  }
+  },
+  "mainBinaryName": "SConfig"
 }

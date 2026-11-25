@@ -1,10 +1,10 @@
-# Switchboard
+# SConfig
 
 An offline Windows game configuration manager built with Tauri 2, Rust, SQLite, React, TypeScript, Tailwind CSS and Lucide.
 
 ## First switch
 
-1. Open Switchboard. The library reads local launcher metadata on startup. Use **Add game** for a manual entry, or open a detected game and select **Set up game**.
+1. Open SConfig. The library reads local launcher metadata on startup. Use **Add game** for a manual entry, or open a detected game and select **Set up game**.
 2. Select the executable that actually runs while playing. Select the individual settings files to manage. **Browse folder** starts a file picker inside the folder you choose. Repeat to add files from multiple locations.
 3. Setup captures **Original settings** automatically. Rename it from its profile menu. Use **Create configuration** for additional snapshots.
 4. Change settings in the game, close it, then capture a second configuration. Use **Switch to profile** to activate it. If you want to keep the first profile as originally captured, choose **Discard Changes & Switch**. A recovery point preserves the live bytes.
@@ -28,7 +28,7 @@ Build the release executable and NSIS setup package with the following command.
 npm run tauri build
 ~~~
 
-The executable is written to **src-tauri/target/release/switchboard.exe**. For portable profile storage, place the executable in a writable directory and launch it with **--portable**. Game destination mappings remain specific to the PC. Use ZIP export and import to move profiles between machines.
+The executable is written to **src-tauri/target/release/SConfig.exe**. For portable profile storage, place the executable in a writable directory and launch it with **--portable**. Game destination mappings remain specific to the PC. Use ZIP export and import to move profiles between machines.
 
 ## Discovery and coverage
 
@@ -41,7 +41,7 @@ The executable is written to **src-tauri/target/release/switchboard.exe**. For p
 
 ## Storage and recovery
 
-The default workspace is **%LOCALAPPDATA%/local.switchboard.configmanager**. A single SQLite database stores game metadata, stable profile IDs, relative file slots, SHA-256 hashes, binary snapshots and the switch journal. **profiles/** contains editable working copies on demand. ZIP archives contain slot numbers and filenames in place of absolute Windows paths.
+The default workspace is **%LOCALAPPDATA%/local.sconfig.configmanager**. A single SQLite database stores game metadata, stable profile IDs, relative file slots, SHA-256 hashes, binary snapshots and the switch journal. **profiles/** contains editable working copies on demand. ZIP archives contain slot numbers and filenames in place of absolute Windows paths.
 
 Before writing live settings, the backend validates the target snapshot, compares bytes, checks the selected executable's process name and commits a recovery snapshot and journal entry. It verifies each temporary file, replaces only the explicitly mapped destination and rereads the result. Unchanged files keep their timestamps. A missing file captured in a recovery point is an explicit absence. The active profile changes only after verification succeeds.
 
@@ -55,7 +55,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 To run just the storage and switching tests without the desktop UI dependencies, add **--lib --no-default-features**. Tests use temporary directories and include real Windows sharing locks, binary files, multi-root configurations, crash recovery and rejected archive entries.
 
-After building the release executable, **npm run test:desktop** exercises the Windows file pickers, manual registration, profile creation, unsaved-changes prompt and recovery through the desktop interface. It creates a separate portable workspace under **.test-output/** and saves screenshots there. Close other Switchboard instances first because the app enforces a single running instance.
+After building the release executable, **npm run test:desktop** exercises the Windows file pickers, manual registration, profile creation, unsaved-changes prompt and recovery through the desktop interface. It creates a separate portable workspace under **.test-output/** and saves screenshots there. Close other SConfig instances first because the app enforces a single running instance.
 
 
 
@@ -76,3 +76,5 @@ Prism's default roaming data folder is checked during a library scan. For portab
 Use a Prism profile's **Copy to other instances** action to select destinations. Activation after copying uses the same backups and unsaved-settings prompts as an individual switch. Cancel stops the remaining activations. Instances activated earlier in the sequence keep their completed state and recovery points. Close Minecraft first. Java process protection conservatively blocks activation while java.exe or javaw.exe is running.
 
 The desktop smoke test uses registered temporary fixtures by default. Pass **--native** to the Node script to additionally exercise the Windows registration and thumbnail pickers. Native-picker automation depends on the interactive Windows dialog layout. If Java is running, the Prism check verifies that copies persist while activation is blocked and destination files remain intact.
+
+On first launch, SConfig imports the previous app's library, profiles, recovery points and appearance preferences into its new workspace. Close the previous app before launching SConfig for that first import. The import publishes the new workspace only after its database and editable files have been copied successfully.

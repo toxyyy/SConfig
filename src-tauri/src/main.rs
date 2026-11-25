@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod desktop;
+use sconfig::{archive, discovery, files, migration, storage, switching};
 use std::sync::Mutex;
-use switchboard::{archive, discovery, files, storage, switching};
 use tauri::Manager;
 
 fn main() {
@@ -13,20 +13,48 @@ fn main() {
             }
         }))
         .setup(|app| {
-            let dir = if std::env::args_os().any(|a| a == "--portable") {
+            let portable = std::env::args_os().any(|a| a == "--portable");
+            let dir = if portable {
                 std::env::current_exe()?
                     .parent()
                     .ok_or("Missing executable folder")?
-                    .join("SwitchboardData")
+                    .join("SConfigData")
             } else {
                 app.path().app_local_data_dir()?
             };
+            // These names are retained solely to import installations made before the rename.
+            let previous = dir
+                .parent()
+                .ok_or("Missing workspace parent")?
+                .join(if portable {
+                    "SwitchboardData"
+                } else {
+                    "local.switchboard.configmanager"
+                });
+            if !dir.exists() && previous.join("library.sqlite3").is_file() {
+                if let Err(error) = files::game_closed(std::path::Path::new("switchboard.exe")) {
+                    rfd::MessageDialog::new()
+                        .set_title("SConfig")
+                        .set_description("Close the previous version of the app, then open SConfig again. SConfig will import your saved library and profiles on first launch.")
+                        .set_level(rfd::MessageLevel::Warning)
+                        .show();
+                    return Err(error.into());
+                }
+                migration::import_workspace(&previous, &dir)?;
+            }
             let store = storage::Store::open(&dir)?;
             app.manage(Mutex::new(desktop::Session {
                 store,
                 grants: Default::default(),
                 watcher: None,
             }));
+            let window = app
+                .config()
+                .app
+                .windows
+                .first()
+                .ok_or("Missing main window configuration")?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), window)?.build()?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -46,5 +74,5 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![desktop::request])
         .run(tauri::generate_context!())
-        .expect("Unable to start Switchboard");
+        .expect("Unable to start SConfig");
 }

@@ -38,7 +38,7 @@ impl Fixture {
             id: id(),
             name: "Fixture".into(),
             platform: "Other".into(),
-            exe: Some(temp.path().join("switchboard-test-game.exe")),
+            exe: Some(temp.path().join("sconfig-test-game.exe")),
             install: temp.path().into(),
             maps,
             active: None,
@@ -437,4 +437,57 @@ fn overview_reads_cfg_console_values_without_exposing_unrecognized_keys() {
     assert_eq!(values.len(), 2);
     assert_eq!(values[0].value, "0.4");
     assert_eq!(values[1].value, "90");
+}
+
+#[test]
+fn renamed_workspace_imports_wal_profiles_and_preferences_once() -> Result<()> {
+    let f = Fixture::new()?;
+    let edits = f.store.dir.join("profiles/editable");
+    fs::create_dir_all(&edits)?;
+    fs::write(edits.join("settings.ini"), b"custom settings")?;
+    let preferences = f.store.dir.join("EBWebView/Default/Local Storage/leveldb");
+    fs::create_dir_all(&preferences)?;
+    fs::write(preferences.join("fixture.log"), b"theme preference")?;
+    let destination = f._temp.path().join("SConfigData");
+    assert!(crate::migration::import_workspace(
+        &f.store.dir,
+        &destination
+    )?);
+    let imported = Store::open(&destination)?;
+    assert_eq!(imported.game(&f.g.id)?.active, Some(f.a.id.clone()));
+    assert_eq!(imported.load(&f.a, 2)?, f.store.load(&f.a, 2)?);
+    assert_eq!(
+        fs::read(destination.join("profiles/editable/settings.ini"))?,
+        b"custom settings"
+    );
+    assert_eq!(
+        fs::read(destination.join("EBWebView/Default/Local Storage/leveldb/fixture.log"))?,
+        b"theme preference"
+    );
+    let mut renamed = f.a.clone();
+    renamed.name = "Updated in SConfig".into();
+    Store::put_profile(&imported.db, &renamed)?;
+    assert!(!crate::migration::import_workspace(
+        &f.store.dir,
+        &destination
+    )?);
+    assert_eq!(
+        imported.profile(&f.g.id, &f.a.id)?.name,
+        "Updated in SConfig"
+    );
+    assert_eq!(f.store.profile(&f.g.id, &f.a.id)?.name, f.a.name);
+    Ok(())
+}
+#[test]
+fn failed_workspace_import_preserves_source_and_leaves_no_partial_destination() -> Result<()> {
+    let f = Fixture::new()?;
+    fs::write(f.store.dir.join("profiles"), b"invalid directory")?;
+    let destination = f._temp.path().join("SConfigData");
+    assert!(crate::migration::import_workspace(&f.store.dir, &destination).is_err());
+    assert!(!destination.exists());
+    assert_eq!(
+        f.store.load(&f.a, 2)?[0].as_deref(),
+        Some(b"low".as_slice())
+    );
+    Ok(())
 }
